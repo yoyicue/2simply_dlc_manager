@@ -59,7 +59,9 @@ class MainWindow(QMainWindow):
         
         self._setup_ui()
         self._connect_signals()
-        self._load_saved_state()
+        
+        # 异步加载保存的状态
+        asyncio.create_task(self._load_saved_state())
     
     def _setup_ui(self):
         """设置用户界面"""
@@ -286,10 +288,16 @@ class MainWindow(QMainWindow):
         self.status_filter_combo.currentTextChanged.connect(self._apply_filters)
         self.search_line_edit.textChanged.connect(self._apply_filters)
     
-    def _load_saved_state(self):
+    async def _load_saved_state(self):
         """加载保存的状态"""
         try:
-            file_items, output_dir = self.data_manager.load_state()
+            # 异步加载状态，避免启动时阻塞UI
+            loop = asyncio.get_event_loop()
+            file_items, output_dir = await loop.run_in_executor(
+                None,
+                self.data_manager.load_state
+            )
+            
             if file_items:
                 self.file_table_model.set_file_items(file_items)
                 self._log(f"加载了 {len(file_items)} 个文件的保存状态")
@@ -303,7 +311,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log(f"加载保存状态失败: {e}")
     
-    def _load_file_mapping(self):
+    @qasync.asyncSlot()
+    async def _load_file_mapping(self):
         """加载文件映射"""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -315,18 +324,33 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
         
+        # 显示加载进度
+        self.status_label.setText("正在加载文件映射...")
+        self.load_file_btn.setEnabled(False)
+        
         try:
-            file_items = self.data_manager.load_file_mapping(Path(file_path))
+            # 在线程池中异步加载文件，避免阻塞UI
+            loop = asyncio.get_event_loop()
+            file_items = await loop.run_in_executor(
+                None, 
+                self.data_manager.load_file_mapping, 
+                Path(file_path)
+            )
+            
             self.file_table_model.set_file_items(file_items)
             
             self.mapping_file_label.setText(f"映射文件: {Path(file_path).name}")
             self._log(f"成功加载 {len(file_items)} 个文件，已默认全选")
             self._update_ui_state()
             self._update_statistics()
+            self.status_label.setText("文件映射加载完成")
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"加载文件映射失败:\n{e}")
             self._log(f"加载文件映射失败: {e}")
+            self.status_label.setText("文件映射加载失败")
+        finally:
+            self.load_file_btn.setEnabled(True)
     
     def _select_output_directory(self):
         """选择输出目录"""
@@ -481,7 +505,8 @@ class MainWindow(QMainWindow):
                 self.file_table_model.update_file_item(item)
                 break
     
-    def _on_file_completed(self, filename: str, success: bool, message: str):
+    @qasync.asyncSlot(str, bool, str)
+    async def _on_file_completed(self, filename: str, success: bool, message: str):
         """文件下载完成"""
         status = "成功" if success else "失败"
         self._log(f"文件下载完成: {filename} - {status} ({message})")
@@ -506,9 +531,12 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(int(global_progress))
             self.status_label.setText(f"下载中... {global_completed}/{global_total} ({global_progress:.1f}%)")
         
-        # 保存状态
+        # 异步保存状态，避免阻塞UI
         try:
-            self.data_manager.save_state(
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                self.data_manager.save_state,
                 self.file_table_model.get_file_items(),
                 self.current_output_dir
             )
