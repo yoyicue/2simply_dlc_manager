@@ -132,16 +132,20 @@ class FileItem:
 
 @dataclass
 class DownloadConfig:
-    """下载配置"""
-    concurrent_requests: int = 50  # 提高并发数到50
-    timeout: int = 120  # 增加超时时间到120秒
-    batch_size: int = 20  # 增加批次大小到20
-    retry_delay: float = 0.5  # 减少重试延迟到0.5秒
+    """下载配置 - 基于真实数据优化版本"""
+    concurrent_requests: int = 80  # 基于15GB下载经验，提高到80
+    timeout: int = 180  # 考虑到最大15MB文件，增加到180秒
+    batch_size: int = 50  # 基于44K文件总量，增加到50
+    retry_delay: float = 0.3  # 减少重试延迟到0.3秒
     asset_base_url: str = "https://assets.joytunes.com/play_assets"
-    max_retries: int = 5  # 增加重试次数到5
-    chunk_size: int = 16384  # 添加块大小配置(16KB)
-    connection_limit: int = 100  # 添加连接池限制
-    connection_limit_per_host: int = 50  # 添加每主机连接限制
+    max_retries: int = 5
+    chunk_size: int = 32768  # 增加到32KB，适应大文件
+    connection_limit: int = 150  # 增加连接池到150
+    connection_limit_per_host: int = 80  # 增加每主机连接到80
+    
+    # 新增：基于文件类型的差异化配置
+    small_file_threshold: int = 100000  # 100KB以下为小文件
+    large_file_threshold: int = 2000000  # 2MB以上为大文件
     
     def __post_init__(self):
         """验证配置参数"""
@@ -158,35 +162,116 @@ class DownloadConfig:
         if self.connection_limit_per_host <= 0:
             self.connection_limit_per_host = 50
     
-    def get_optimal_batch_size(self, total_files: int, files_to_download: int) -> int:
-        """根据实际需要下载的文件数量计算最优批次大小"""
+    def get_optimal_batch_size(self, total_files: int, files_to_download: int, file_items=None) -> int:
+        """根据实际需要下载的文件数量和文件类型计算最优批次大小"""
         if files_to_download == 0:
             return 1
         
-        # 如果需要下载的文件很少，减小批次大小
-        if files_to_download <= 10:
-            return min(5, files_to_download)
-        elif files_to_download <= 50:
-            return min(10, self.batch_size)
-        else:
-            # 根据跳过比例调整批次大小
-            skip_ratio = (total_files - files_to_download) / total_files
-            if skip_ratio > 0.8:  # 超过80%的文件被跳过
-                return max(5, self.batch_size // 2)  # 减小批次大小
-            elif skip_ratio > 0.5:  # 超过50%的文件被跳过
-                return max(10, self.batch_size * 2 // 3)  # 适当减小批次大小
-            else:
-                return self.batch_size  # 使用默认批次大小
-    
-    def get_optimal_concurrent_requests(self, total_files: int, files_to_download: int) -> int:
-        """根据实际需要下载的文件数量计算最优并发数"""
-        optimal_batch_size = self.get_optimal_batch_size(total_files, files_to_download)
+        # 基础批次大小计算
+        base_batch_size = self.batch_size
         
-        # 并发数不应该超过批次大小太多，避免资源浪费
-        # 但也要保持一定的并发度以提高效率
+        # 根据文件数量调整
+        if files_to_download <= 10:
+            base_batch_size = min(5, files_to_download)
+        elif files_to_download <= 50:
+            base_batch_size = min(15, base_batch_size)
+        elif files_to_download <= 200:
+            base_batch_size = min(30, base_batch_size)
+        
+        # 根据跳过比例调整
+        skip_ratio = (total_files - files_to_download) / total_files if total_files > 0 else 0
+        
+        if skip_ratio > 0.95:  # 超过95%的文件被跳过，说明增量下载
+            base_batch_size = max(10, base_batch_size // 3)  # 大幅减小批次
+        elif skip_ratio > 0.8:  # 超过80%的文件被跳过
+            base_batch_size = max(15, base_batch_size // 2)  # 减小批次大小
+        elif skip_ratio > 0.5:  # 超过50%的文件被跳过
+            base_batch_size = max(20, base_batch_size * 2 // 3)  # 适当减小批次大小
+        
+        # 根据文件类型和大小进一步优化
+        if file_items:
+            large_files = sum(1 for item in file_items if getattr(item, 'size', 0) and item.size > self.large_file_threshold)
+            small_files = sum(1 for item in file_items if getattr(item, 'size', 0) and item.size < self.small_file_threshold)
+            
+            large_ratio = large_files / len(file_items) if file_items else 0
+            small_ratio = small_files / len(file_items) if file_items else 0
+            
+            if large_ratio > 0.3:  # 大文件占比超过30%
+                base_batch_size = max(10, base_batch_size // 2)  # 减小批次，避免内存压力
+            elif small_ratio > 0.8:  # 小文件占比超过80%
+                base_batch_size = min(100, base_batch_size * 2)  # 增大批次，提高效率
+        
+        return max(1, base_batch_size)
+    
+    def get_optimal_concurrent_requests(self, total_files: int, files_to_download: int, file_items=None) -> int:
+        """根据实际需要下载的文件数量和类型计算最优并发数"""
+        optimal_batch_size = self.get_optimal_batch_size(total_files, files_to_download, file_items)
+        
+        # 基础并发数计算
+        base_concurrent = self.concurrent_requests
+        
+        # 根据文件数量调整
         if files_to_download <= 5:
             return min(files_to_download, 5)  # 极小文件数时，并发数等于文件数
         elif files_to_download <= 20:
-            return min(optimal_batch_size * 2, self.concurrent_requests)  # 中等文件数时，并发数为批次大小的2倍
+            base_concurrent = min(optimal_batch_size * 2, base_concurrent)  # 中等文件数时
+        elif files_to_download <= 100:
+            base_concurrent = min(optimal_batch_size * 3, base_concurrent)  # 较多文件时
         else:
-            return min(optimal_batch_size * 3, self.concurrent_requests)  # 大量文件时，并发数为批次大小的3倍 
+            base_concurrent = min(optimal_batch_size * 4, base_concurrent)  # 大量文件时，提高并发倍数
+        
+        # 根据文件类型和大小调整并发数
+        if file_items:
+            large_files = sum(1 for item in file_items if getattr(item, 'size', 0) and item.size > self.large_file_threshold)
+            small_files = sum(1 for item in file_items if getattr(item, 'size', 0) and item.size < self.small_file_threshold)
+            
+            large_ratio = large_files / len(file_items) if file_items else 0
+            small_ratio = small_files / len(file_items) if file_items else 0
+            
+            if large_ratio > 0.5:  # 大文件占比超过50%
+                base_concurrent = max(20, base_concurrent // 2)  # 减少并发，避免带宽竞争
+            elif small_ratio > 0.8:  # 小文件占比超过80%
+                base_concurrent = min(120, base_concurrent * 3 // 2)  # 增加并发，充分利用网络
+            
+            # 特殊处理：JSON文件通常较小，PNG文件较大
+            json_files = sum(1 for item in file_items if item.filename.endswith('.json'))
+            png_files = sum(1 for item in file_items if item.filename.endswith('.png'))
+            
+            json_ratio = json_files / len(file_items) if file_items else 0
+            png_ratio = png_files / len(file_items) if file_items else 0
+            
+            if json_ratio > 0.7:  # JSON文件占主导
+                base_concurrent = min(100, base_concurrent * 4 // 3)  # 适当增加并发
+            elif png_ratio > 0.7:  # PNG文件占主导
+                base_concurrent = max(30, base_concurrent * 3 // 4)  # 适当减少并发
+        
+        return max(5, min(base_concurrent, self.concurrent_requests))
+    
+    def get_adaptive_timeout(self, file_item=None) -> int:
+        """根据文件大小自适应调整超时时间"""
+        base_timeout = self.timeout
+        
+        if file_item and hasattr(file_item, 'size') and file_item.size:
+            if file_item.size > self.large_file_threshold:
+                # 大文件：按1MB/10秒计算，最少3分钟
+                estimated_timeout = max(180, (file_item.size / 1024 / 1024) * 10)
+                return min(int(estimated_timeout), base_timeout * 2)
+            elif file_item.size < self.small_file_threshold:
+                # 小文件：减少超时时间
+                return max(60, base_timeout // 2)
+        
+        return base_timeout
+    
+    def get_adaptive_chunk_size(self, file_item=None) -> int:
+        """根据文件大小自适应调整块大小"""
+        base_chunk = self.chunk_size
+        
+        if file_item and hasattr(file_item, 'size') and file_item.size:
+            if file_item.size > self.large_file_threshold:
+                # 大文件使用更大的块
+                return min(65536, base_chunk * 2)  # 最大64KB
+            elif file_item.size < self.small_file_threshold:
+                # 小文件使用较小的块
+                return max(8192, base_chunk // 2)  # 最小8KB
+        
+        return base_chunk 

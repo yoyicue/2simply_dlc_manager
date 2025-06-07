@@ -181,23 +181,23 @@ class MainWindow(QMainWindow):
         
         config_layout.addWidget(QLabel("并发数:"))
         self.concurrent_spin = QSpinBox()
-        self.concurrent_spin.setRange(1, 100)  # 提高最大并发数到100
-        self.concurrent_spin.setValue(50)  # 默认值设为50
-        self.concurrent_spin.setToolTip("同时下载的文件数量，建议10-50之间")
+        self.concurrent_spin.setRange(1, 150)  # 提高最大并发数到150
+        self.concurrent_spin.setValue(80)  # 默认值设为80（基于真实数据优化）
+        self.concurrent_spin.setToolTip("同时下载的文件数量，已基于15GB下载经验优化，建议保持默认值")
         config_layout.addWidget(self.concurrent_spin)
         
         config_layout.addWidget(QLabel("超时(秒):"))
         self.timeout_spin = QSpinBox()
-        self.timeout_spin.setRange(30, 600)  # 增加最大超时时间
-        self.timeout_spin.setValue(120)  # 默认值设为120秒
-        self.timeout_spin.setToolTip("单个文件下载超时时间")
+        self.timeout_spin.setRange(60, 900)  # 增加最大超时时间到15分钟
+        self.timeout_spin.setValue(180)  # 默认值设为180秒（考虑15MB大文件）
+        self.timeout_spin.setToolTip("基础超时时间，系统会根据文件大小自动调整")
         config_layout.addWidget(self.timeout_spin)
         
         config_layout.addWidget(QLabel("批次大小:"))
         self.batch_size_spin = QSpinBox()
-        self.batch_size_spin.setRange(1, 100)  # 提高最大批次大小
-        self.batch_size_spin.setValue(20)  # 默认值设为20
-        self.batch_size_spin.setToolTip("每个批次处理的文件数量")
+        self.batch_size_spin.setRange(1, 200)  # 提高最大批次大小到200
+        self.batch_size_spin.setValue(50)  # 默认值设为50（基于44K文件总量优化）
+        self.batch_size_spin.setToolTip("基础批次大小，系统会根据文件类型和跳过比例自动调整")
         config_layout.addWidget(self.batch_size_spin)
         
         layout.addWidget(config_group)
