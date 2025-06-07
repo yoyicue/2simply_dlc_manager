@@ -26,7 +26,6 @@ hiddenimports = [
     'qasync',
     'aiofiles',
     'aiohttp',
-    'rich',
     'PySide6.QtCore',
     'PySide6.QtWidgets',
     'PySide6.QtGui',
@@ -69,7 +68,6 @@ a = Analysis(
         'jupyter',
         'notebook',
         'pytest',
-        'setuptools',
         # 网络服务
         'flask',
         'django',
