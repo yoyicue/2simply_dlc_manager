@@ -100,7 +100,7 @@ class AboutDialog(QDialog):
         layout.addWidget(version)
         
         # 描述
-        description = QLabel("***REMOVED***")
+        description = QLabel("音乐应用 DLC 资源下载管理工具")
         description.setAlignment(Qt.AlignCenter)
         description.setWordWrap(True)
         description.setStyleSheet("margin: 10px; color: #333;")
