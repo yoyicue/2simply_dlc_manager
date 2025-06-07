@@ -37,6 +37,80 @@ class DataManager:
         except Exception as e:
             raise Exception(f"加载文件映射失败: {str(e)}")
     
+    def load_file_mapping_with_state_diff(self, json_file: Path) -> tuple[List[FileItem], Dict[str, int]]:
+        """从BigFilesMD5s.json加载文件映射，并与现有状态进行diff合并
+        
+        Returns:
+            (merged_file_items, diff_info)
+            diff_info包含: {'new': count, 'existing': count, 'updated': count, 'removed': count}
+        """
+        try:
+            # 1. 加载新的文件映射
+            content = json_file.read_text(encoding='utf-8')
+            content = content.strip()
+            
+            # 处理可能的JSON格式问题
+            if content.endswith(',}'):
+                content = content[:-2] + '}'
+            elif content.endswith(','):
+                content = content[:-1]
+            
+            file_mapping = json.loads(content)
+            
+            # 2. 尝试加载现有状态
+            existing_items = {}
+            try:
+                saved_items, _ = self.load_state()
+                for item in saved_items:
+                    # 使用(filename, md5)作为唯一键
+                    key = (item.filename, item.md5)
+                    existing_items[key] = item
+            except:
+                # 如果没有现有状态或加载失败，继续处理
+                pass
+            
+            # 3. 进行diff合并
+            merged_items = []
+            diff_info = {'new': 0, 'existing': 0, 'updated': 0, 'removed': 0}
+            
+            # 处理新文件映射中的每个文件
+            for filename, md5 in file_mapping.items():
+                key = (filename, md5)
+                
+                if key in existing_items:
+                    # 文件已存在，保留原有状态
+                    existing_item = existing_items[key]
+                    merged_items.append(existing_item)
+                    diff_info['existing'] += 1
+                else:
+                    # 检查是否是同名文件但MD5不同（文件更新）
+                    updated_existing = False
+                    for (existing_filename, existing_md5), existing_item in existing_items.items():
+                        if existing_filename == filename and existing_md5 != md5:
+                            # 同名文件但MD5不同，重置状态
+                            new_item = FileItem(filename=filename, md5=md5)
+                            merged_items.append(new_item)
+                            diff_info['updated'] += 1
+                            updated_existing = True
+                            break
+                    
+                    if not updated_existing:
+                        # 全新文件
+                        new_item = FileItem(filename=filename, md5=md5)
+                        merged_items.append(new_item)
+                        diff_info['new'] += 1
+            
+            # 计算被移除的文件（在旧状态中存在但新映射中不存在）
+            new_mapping_keys = {(filename, md5) for filename, md5 in file_mapping.items()}
+            for key in existing_items.keys():
+                if key not in new_mapping_keys:
+                    diff_info['removed'] += 1
+            
+            return merged_items, diff_info
+            
+        except Exception as e:
+            raise Exception(f"加载文件映射失败: {str(e)}")
+    
     def save_state(self, file_items: List[FileItem], output_dir: Path):
         """保存下载状态"""
         try:

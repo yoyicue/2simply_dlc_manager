@@ -118,7 +118,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         
         # 文件操作
-        self.load_file_btn = QPushButton("加载文件映射")
+        self.load_file_btn = QPushButton("加载BigFilesMD5s.json")
         self.load_file_btn.setToolTip("加载BigFilesMD5s.json文件")
         layout.addWidget(self.load_file_btn)
         
@@ -342,30 +342,52 @@ class MainWindow(QMainWindow):
             return
         
         # 显示加载进度
-        self.status_label.setText("正在加载文件映射...")
+        self.status_label.setText("正在加载BigFilesMD5s.json...")
         self.load_file_btn.setEnabled(False)
         
         try:
             # 在线程池中异步加载文件，避免阻塞UI
             loop = asyncio.get_event_loop()
-            file_items = await loop.run_in_executor(
+            file_items, diff_info = await loop.run_in_executor(
                 None, 
-                self.data_manager.load_file_mapping, 
+                self.data_manager.load_file_mapping_with_state_diff, 
                 Path(file_path)
             )
             
             self.file_table_model.set_file_items(file_items)
             
             self.mapping_file_label.setText(f"映射文件: {Path(file_path).name}")
-            self._log(f"成功加载 {len(file_items)} 个文件，已默认全选")
+            
+            # 生成差异报告
+            diff_msg = f"加载完成 - 总计: {len(file_items)} 个文件"
+            if diff_info['existing'] > 0:
+                diff_msg += f" | 保留已有状态: {diff_info['existing']}"
+            if diff_info['new'] > 0:
+                diff_msg += f" | 新增: {diff_info['new']}"
+            if diff_info['updated'] > 0:
+                diff_msg += f" | 更新: {diff_info['updated']}"
+            if diff_info['removed'] > 0:
+                diff_msg += f" | 移除: {diff_info['removed']}"
+            
+            self._log(diff_msg)
+            
+            # 如果有保留的状态，显示更详细的信息
+            if diff_info['existing'] > 0:
+                self._log(f"✅ 智能合并: 已保留 {diff_info['existing']} 个文件的下载状态，避免重复检查")
+            if diff_info['new'] > 0:
+                self._log(f"🆕 发现 {diff_info['new']} 个新文件，已标记为待下载")
+            if diff_info['updated'] > 0:
+                self._log(f"🔄 检测到 {diff_info['updated']} 个文件有更新，已重置下载状态")
+            if diff_info['removed'] > 0:
+                self._log(f"⚠️  {diff_info['removed']} 个文件在新映射中不存在，已从列表移除")
             self._update_ui_state()
             self._update_statistics()
-            self.status_label.setText("文件映射加载完成")
+            self.status_label.setText("BigFilesMD5s.json加载完成")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"加载文件映射失败:\n{e}")
-            self._log(f"加载文件映射失败: {e}")
-            self.status_label.setText("文件映射加载失败")
+            QMessageBox.critical(self, "错误", f"加载BigFilesMD5s.json失败:\n{e}")
+            self._log(f"加载BigFilesMD5s.json失败: {e}")
+            self.status_label.setText("BigFilesMD5s.json加载失败")
         finally:
             self.load_file_btn.setEnabled(True)
     
