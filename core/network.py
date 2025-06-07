@@ -137,7 +137,7 @@ class AsyncHttpClient:
                   f"连接复用{self._connection_reused}次, "
                   f"会话时长{session_duration:.1f}秒")
     
-    async def stream_download(self, url: str, headers: Optional[Dict[str, str]] = None) -> 'DownloadResponse':
+    def stream_download(self, url: str, headers: Optional[Dict[str, str]] = None) -> 'DownloadResponse':
         """流式下载，支持Range请求和进度跟踪"""
         merged_headers = {}
         if headers:
@@ -146,11 +146,13 @@ class AsyncHttpClient:
         self._total_requests += 1
         
         if HTTPX_AVAILABLE and isinstance(self._client, httpx.AsyncClient):
-            response = await self._client.stream('GET', url, headers=merged_headers)
-            return HttpxDownloadResponse(response, self)
+            # 返回httpx的流式响应context manager
+            response_cm = self._client.stream('GET', url, headers=merged_headers)
+            return HttpxDownloadResponse(response_cm, self)
         else:
-            response = await self._client.get(url, headers=merged_headers)
-            return AiohttpDownloadResponse(response, self)
+            # aiohttp 返回 context manager，需要特殊处理
+            response_cm = self._client.get(url, headers=merged_headers)
+            return AiohttpDownloadResponse(response_cm, self)
     
     async def head_request(self, url: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """HEAD请求获取文件元信息"""
@@ -215,51 +217,82 @@ class DownloadResponse:
     async def iter_chunks(self, chunk_size: int = 32768) -> AsyncIterator[bytes]:
         """迭代读取响应数据块"""
         raise NotImplementedError
-        
-    async def __aenter__(self):
-        return self
-        
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if hasattr(self.response, 'aclose'):
-            await self.response.aclose()
-        elif hasattr(self.response, 'close'):
-            self.response.close()
 
 
 class HttpxDownloadResponse(DownloadResponse):
     """httpx 响应封装"""
     
+    def __init__(self, response_cm, client: AsyncHttpClient):
+        self.response_cm = response_cm  # httpx stream context manager
+        self.response = None  # 实际的 response 对象
+        self.client = client
+        self._downloaded_bytes = 0
+    
     @property
     def status_code(self) -> int:
+        if self.response is None:
+            raise RuntimeError("Response not initialized. Use 'async with' to access.")
         return self.response.status_code
         
     @property
     def headers(self) -> Dict[str, str]:
+        if self.response is None:
+            raise RuntimeError("Response not initialized. Use 'async with' to access.")
         return dict(self.response.headers)
     
     async def iter_chunks(self, chunk_size: int = 32768) -> AsyncIterator[bytes]:
+        if self.response is None:
+            raise RuntimeError("Response not initialized. Use 'async with' to access.")
         async for chunk in self.response.aiter_bytes(chunk_size):
             self._downloaded_bytes += len(chunk)
             self.client.track_bytes_downloaded(len(chunk))
             yield chunk
+    
+    async def __aenter__(self):
+        self.response = await self.response_cm.__aenter__()
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.response_cm:
+            await self.response_cm.__aexit__(exc_type, exc_val, exc_tb)
 
 
 class AiohttpDownloadResponse(DownloadResponse):
     """aiohttp 响应封装"""
     
+    def __init__(self, response_cm, client: AsyncHttpClient):
+        self.response_cm = response_cm  # aiohttp context manager
+        self.response = None  # 实际的 response 对象
+        self.client = client
+        self._downloaded_bytes = 0
+    
     @property
     def status_code(self) -> int:
+        if self.response is None:
+            raise RuntimeError("Response not initialized. Use 'async with' to access.")
         return self.response.status
         
     @property
     def headers(self) -> Dict[str, str]:
+        if self.response is None:
+            raise RuntimeError("Response not initialized. Use 'async with' to access.")
         return dict(self.response.headers)
     
     async def iter_chunks(self, chunk_size: int = 32768) -> AsyncIterator[bytes]:
+        if self.response is None:
+            raise RuntimeError("Response not initialized. Use 'async with' to access.")
         async for chunk in self.response.content.iter_chunked(chunk_size):
             self._downloaded_bytes += len(chunk)
             self.client.track_bytes_downloaded(len(chunk))
             yield chunk
+    
+    async def __aenter__(self):
+        self.response = await self.response_cm.__aenter__()
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.response_cm:
+            await self.response_cm.__aexit__(exc_type, exc_val, exc_tb)
 
 
 class NetworkManager:

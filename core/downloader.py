@@ -93,6 +93,7 @@ class Downloader(QObject):
         elif cache_analysis['recommendation'] == 'incremental_check':
             return await self._smart_incremental_check(file_items, output_dir, cache_analysis)
         else:
+            # 当缓存不可靠或文件状态为PENDING时，总是进行完整磁盘扫描
             return await self._optimized_full_scan(file_items, output_dir)
     
     async def _cache_based_check(self, file_items: List[FileItem], output_dir: Path) -> tuple[List[FileItem], List[FileItem]]:
@@ -115,6 +116,9 @@ class Downloader(QObject):
             if (item.status == DownloadStatus.COMPLETED and 
                 item.disk_verified and 
                 item.is_cache_valid(file_path)):
+                need_verification.append(item)
+            elif item.status == DownloadStatus.PENDING:
+                # PENDING状态的文件需要检查磁盘
                 need_verification.append(item)
             else:
                 files_to_download.append(item)
@@ -166,8 +170,11 @@ class Downloader(QObject):
             elif item.status == DownloadStatus.COMPLETED:
                 # 需要验证的已完成文件
                 items_need_verification.append(item)
+            elif item.status == DownloadStatus.PENDING:
+                # PENDING状态的文件需要检查磁盘
+                items_need_verification.append(item)
             else:
-                # 明确需要下载的文件
+                # 明确需要下载的文件（失败、取消等状态）
                 files_to_download.append(item)
         
         # 第二阶段：并行验证需要检查的文件
@@ -507,7 +514,7 @@ class Downloader(QObject):
                 headers['Accept-Encoding'] = 'gzip, br, deflate'
             
             # 使用新的网络客户端流式下载
-            async with await self._http_client.stream_download(url, headers) as response:
+            async with self._http_client.stream_download(url, headers) as response:
                 if response.status_code != 200:
                     raise Exception(f"HTTP {response.status_code}")
                 
