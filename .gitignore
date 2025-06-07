@@ -26,7 +26,8 @@ MANIFEST
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
-*.spec
+# Keep our build.spec file
+# *.spec
 
 # Installer logs
 pip-log.txt
@@ -135,4 +136,12 @@ Thumbs.db
 
 # Project specific
 BigFilesMD5s.json
-dlc/ 
+dlc/
+dlc_download_state.json
+
+# Build and distribution
+logs/
+*.zip
+
+# Temporary files
+create_icon.py 

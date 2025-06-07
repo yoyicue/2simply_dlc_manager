@@ -13,9 +13,11 @@ sys.path.insert(0, str(project_root))
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QCoreApplication
+from PySide6.QtGui import QIcon
 import qasync
 
 from ui import MainWindow
+from utils.exception_handler import GlobalExceptionHandler
 
 
 class DLCManagerApp:
@@ -30,17 +32,41 @@ class DLCManagerApp:
         # 创建Qt应用
         self.app = QApplication(sys.argv)
         
+        # 设置全局异常处理
+        self.exception_handler = GlobalExceptionHandler()
+        
         # 设置应用程序样式
         self.app.setStyle('Fusion')  # 使用Fusion样式以获得现代外观
         
         # 加载样式表
         self._load_stylesheet()
         
-        # 应用程序图标
-        # self.app.setWindowIcon(QIcon("resources/icon.png"))  # 如果有图标文件
+        # 设置应用程序图标
+        self._set_app_icon()
         
         # 创建主窗口
         self.main_window = MainWindow()
+    
+    def _set_app_icon(self):
+        """设置应用程序图标"""
+        try:
+            # 按优先级尝试不同的图标格式
+            icon_candidates = [
+                "resources/icons/app_icon.png",  # 首选PNG（UI显示）
+                "resources/icons/app_icon.ico",  # Windows ICO
+                "resources/icons/app_icon.icns", # macOS ICNS
+            ]
+            
+            for icon_path in icon_candidates:
+                if Path(icon_path).exists():
+                    self.app.setWindowIcon(QIcon(str(icon_path)))
+                    print(f"✅ 应用图标已设置: {icon_path}")
+                    break
+            else:
+                print("⚠️  未找到应用图标文件")
+                
+        except Exception as e:
+            print(f"设置应用图标失败: {e}")
     
     def _load_stylesheet(self):
         """加载样式表"""
