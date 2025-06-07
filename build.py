@@ -27,6 +27,10 @@ def check_dependencies():
     """检查构建依赖"""
     print("🔍 检查构建依赖...")
     
+    # 检查Python版本
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    print(f"✅ Python版本: {python_version}")
+    
     # 检查 PyInstaller
     try:
         import PyInstaller
@@ -49,6 +53,13 @@ def check_dependencies():
             print(f"❌ 缺少必要文件: {file_path}")
             return False
         print(f"✅ 找到文件: {file_path}")
+    
+    # 检查DLC目录（提示用户）
+    dlc_path = Path("dlc")
+    if dlc_path.exists():
+        print("💡 检测到dlc目录，已排除在构建包外（避免15GB+文件）")
+    else:
+        print("📌 未检测到dlc目录 - 用户可稍后添加DLC文件")
     
     return True
 
@@ -100,7 +111,7 @@ def verify_build():
     return False
 
 def create_installer():
-    """创建安装包（可选）"""
+    """创建分发包"""
     print("📦 创建分发包...")
     
     dist_dir = Path("dist")
@@ -110,17 +121,32 @@ def create_installer():
     
     # 创建压缩包
     import zipfile
+    import platform
     
-    zip_name = f"DLC_Manager_v1.0.0_{sys.platform}.zip"
+    # 更好的平台名称
+    platform_name = {
+        'win32': 'Windows',
+        'darwin': 'macOS', 
+        'linux': 'Linux'
+    }.get(sys.platform, sys.platform)
+    
+    arch = platform.machine()
+    zip_name = f"DLC_Manager_v1.0.0_{platform_name}_{arch}.zip"
     zip_path = Path("dist") / zip_name
     
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for file_path in dist_dir.rglob("*"):
             if file_path.name != zip_name and file_path.is_file():
+                # macOS: 只打包 .app 文件，跳过独立的可执行文件以避免重复
+                if sys.platform == "darwin" and file_path.name == "DLC Manager" and file_path.parent == dist_dir:
+                    print(f"⏭️  跳过重复的独立可执行文件: {file_path.name}")
+                    continue
+                    
                 arcname = file_path.relative_to(dist_dir)
                 zipf.write(file_path, arcname)
     
-    print(f"✅ 分发包已创建: {zip_path}")
+    file_size = zip_path.stat().st_size / (1024 * 1024)  # MB
+    print(f"✅ 分发包已创建: {zip_path} ({file_size:.1f} MB)")
     return True
 
 def main():
