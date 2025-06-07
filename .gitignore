@@ -138,6 +138,14 @@ Thumbs.db
 BigFilesMD5s.json
 dlc/
 dlc_download_state.json
+# 用户数据和缓存
+*.state
+*.cache
+user_data/
+cache/
+downloads/
+temp/
+.temp/
 
 # Build and distribution
 logs/
