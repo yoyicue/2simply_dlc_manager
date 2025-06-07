@@ -147,6 +147,12 @@ class DownloadConfig:
     small_file_threshold: int = 100000  # 100KB以下为小文件
     large_file_threshold: int = 2000000  # 2MB以上为大文件
     
+    # HTTP/2 网络优化配置
+    use_http2: bool = True  # 启用HTTP/2
+    enable_network_optimization: bool = True  # 启用网络优化
+    auto_detect_http2: bool = True  # 自动检测HTTP/2支持
+    fallback_to_http1: bool = True  # HTTP/2失败时降级到HTTP/1.1
+    
     def __post_init__(self):
         """验证配置参数"""
         if self.concurrent_requests <= 0:
@@ -274,4 +280,33 @@ class DownloadConfig:
                 # 小文件使用较小的块
                 return max(8192, base_chunk // 2)  # 最小8KB
         
-        return base_chunk 
+        return base_chunk
+    
+    def create_network_config(self, file_items=None) -> 'NetworkConfig':
+        """根据下载配置创建网络配置"""
+        # 延迟导入避免循环依赖
+        from .network import NetworkConfig
+        
+        # 根据文件数量和类型调整网络配置
+        max_connections = self.connection_limit
+        max_keepalive = self.connection_limit_per_host
+        
+        if file_items:
+            file_count = len(file_items)
+            if file_count > 10000:
+                max_connections = min(150, max_connections)
+                max_keepalive = min(80, max_keepalive)
+            elif file_count < 100:
+                max_connections = max(20, max_connections // 3)
+                max_keepalive = max(10, max_keepalive // 3)
+        
+        return NetworkConfig(
+            use_http2=self.use_http2 and self.enable_network_optimization,
+            max_connections=max_connections,
+            max_keepalive=max_keepalive,
+            timeout_seconds=self.timeout,
+            connect_timeout=min(30, self.timeout // 6),
+            read_timeout=min(60, self.timeout // 3),
+            enable_performance_tracking=True,
+            connection_pool_stats=True
+        ) 

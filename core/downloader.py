@@ -1,8 +1,7 @@
 """
-异步下载器模块
+异步下载器模块 - HTTP/2 优化版本
 """
 import asyncio
-import aiohttp
 import aiofiles
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
@@ -10,6 +9,14 @@ from PySide6.QtCore import QObject, Signal, QModelIndex
 import os  # 局部导入, 避免顶层不必要依赖
 
 from .models import FileItem, DownloadStatus, DownloadConfig
+from .network import NetworkManager, AsyncHttpClient, NetworkConfig
+
+# 向后兼容的导入
+try:
+    import aiohttp
+    AIOHTTP_AVAILABLE = True
+except ImportError:
+    AIOHTTP_AVAILABLE = False
 
 
 class Downloader(QObject):
@@ -28,7 +35,17 @@ class Downloader(QObject):
     def __init__(self, config: Optional[DownloadConfig] = None):
         super().__init__()
         self.config = config or DownloadConfig()
+        
+        # HTTP/2 网络层
+        self.network_manager = NetworkManager()
+        self._http_client: Optional[AsyncHttpClient] = None
+        self._network_config: Optional[NetworkConfig] = None
+        self._http2_enabled = False
+        
+        # 向后兼容的会话
         self._session: Optional[aiohttp.ClientSession] = None
+        
+        # 下载状态
         self._is_cancelled = False
         self._is_downloading = False
         self._semaphore: Optional[asyncio.Semaphore] = None
@@ -340,33 +357,29 @@ class Downloader(QObject):
         self.log_message.emit(f"使用智能优化并发数: {optimal_concurrent} (基于文件类型和大小分析)")
         self._semaphore = asyncio.Semaphore(optimal_concurrent)
         
-        # 配置 aiohttp 会话 - 性能优化版本，使用自适应超时
-        base_timeout = self.config.timeout
-        timeout = aiohttp.ClientTimeout(
-            total=base_timeout,
-            connect=min(30, base_timeout / 4),
-            sock_read=min(60, base_timeout / 2)
-        )
+        # 创建网络配置和客户端
+        self._network_config = self.config.create_network_config(files_to_download)
         
-        connector = aiohttp.TCPConnector(
-            limit=self.config.connection_limit,
-            limit_per_host=self.config.connection_limit_per_host,
-            force_close=False,
-            enable_cleanup_closed=True,
-            keepalive_timeout=30,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            happy_eyeballs_delay=0.25,
-            ssl=False
-        )
+        # HTTP/2 支持检测和降级
+        if self.config.use_http2 and self.config.auto_detect_http2:
+            try:
+                http2_supported = await self.network_manager.probe_http2_support(self.config.asset_base_url)
+                if http2_supported:
+                    self._http2_enabled = True
+                    self.log_message.emit("🚀 HTTP/2 支持已启用，连接复用优化激活")
+                else:
+                    self._http2_enabled = False
+                    self._network_config.use_http2 = False
+                    self.log_message.emit("⚠️  服务器不支持HTTP/2，自动降级到HTTP/1.1")
+            except Exception as e:
+                self._http2_enabled = False
+                self._network_config.use_http2 = False
+                self.log_message.emit(f"⚠️  HTTP/2检测失败，降级到HTTP/1.1: {str(e)}")
         
         try:
-            async with aiohttp.ClientSession(
-                connector=connector,
-                timeout=timeout,
-                raise_for_status=False
-            ) as session:
-                self._session = session
+            # 使用新的网络客户端
+            async with AsyncHttpClient(self._network_config) as http_client:
+                self._http_client = http_client
                 
                 # 分批处理需要下载的文件 - 使用基于文件类型的智能批次大小
                 optimal_batch_size = self.config.get_optimal_batch_size(len(file_items), len(files_to_download), files_to_download)
@@ -416,7 +429,8 @@ class Downloader(QObject):
         except Exception as e:
             self.log_message.emit(f"下载过程中发生错误: {str(e)}")
         finally:
-            self._session = None
+            self._http_client = None
+            self._network_config = None
             self._is_downloading = False
         
         # 统计结果
@@ -481,34 +495,34 @@ class Downloader(QObject):
             return False
     
     async def _download_with_progress(self, file_item: FileItem, url: str, local_path: Path) -> bool:
-        """带进度的下载 - 使用自适应配置"""
+        """带进度的下载 - HTTP/2 优化版本"""
         try:
-            # 使用自适应超时和块大小
-            adaptive_timeout = self.config.get_adaptive_timeout(file_item)
+            # 使用自适应块大小
             adaptive_chunk_size = self.config.get_adaptive_chunk_size(file_item)
             
-            # 为单个文件创建自适应超时
-            file_timeout = aiohttp.ClientTimeout(
-                total=adaptive_timeout,
-                connect=min(30, adaptive_timeout / 4),
-                sock_read=min(60, adaptive_timeout / 2)
-            )
+            # 准备请求头
+            headers = {}
+            if file_item.filename.endswith('.json'):
+                headers['Accept-Encoding'] = 'gzip, br, deflate'
             
-            async with self._session.get(url, timeout=file_timeout) as response:
-                if response.status != 200:
-                    raise Exception(f"HTTP {response.status}")
+            # 使用新的网络客户端流式下载
+            async with await self._http_client.stream_download(url, headers) as response:
+                if response.status_code != 200:
+                    raise Exception(f"HTTP {response.status_code}")
                 
                 # 获取文件大小
-                content_length = response.headers.get('content-length')
-                if content_length:
-                    file_item.size = int(content_length)
+                if response.content_length:
+                    file_item.size = response.content_length
+                
+                # 检测协议版本
+                protocol_info = "HTTP/2" if self._http2_enabled else "HTTP/1.1"
                 
                 # 下载文件
                 if file_item.is_binary_file:
-                    # 二进制文件 - 性能优化版本，使用自适应块大小
+                    # 二进制文件 - 流式下载
                     async with aiofiles.open(local_path, 'wb') as f:
                         downloaded = 0
-                        async for chunk in response.content.iter_chunked(adaptive_chunk_size):
+                        async for chunk in response.iter_chunks(adaptive_chunk_size):
                             if self._is_cancelled:
                                 return False
                             
@@ -522,8 +536,19 @@ class Downloader(QObject):
                                 file_item.downloaded_size = downloaded
                                 self.progress_updated.emit(file_item.filename, progress)
                 else:
-                    # 文本文件
-                    content = await response.text()
+                    # 文本文件 - 流式读取
+                    content_bytes = b''
+                    async for chunk in response.iter_chunks(adaptive_chunk_size):
+                        if self._is_cancelled:
+                            return False
+                        content_bytes += chunk
+                    
+                    # 解码并写入
+                    try:
+                        content = content_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        content = content_bytes.decode('utf-8', errors='replace')
+                    
                     async with aiofiles.open(local_path, 'w', encoding='utf-8') as f:
                         await f.write(content)
                     
@@ -541,14 +566,15 @@ class Downloader(QObject):
                 # 记录下载性能信息
                 if file_item.size:
                     file_type = "大文件" if file_item.size > self.config.large_file_threshold else "小文件" if file_item.size < self.config.small_file_threshold else "中等文件"
-                    self.log_message.emit(f"✅ {file_type} {file_item.filename} 下载完成 ({file_item.size/1024:.1f}KB, 块大小:{adaptive_chunk_size/1024:.1f}KB, 超时:{adaptive_timeout}s)")
+                    compression_info = "压缩传输" if 'gzip' in headers.get('Accept-Encoding', '') else "原始传输"
+                    self.log_message.emit(f"✅ {protocol_info} {file_type} {file_item.filename} 下载完成 "
+                                        f"({file_item.size/1024:.1f}KB, {compression_info}, 块大小:{adaptive_chunk_size/1024:.1f}KB)")
                 
                 self.file_completed.emit(file_item.filename, True, "下载成功")
                 return True
                 
         except asyncio.TimeoutError:
-            timeout_msg = f"下载超时 (自适应超时: {adaptive_timeout}秒)"
-            raise Exception(timeout_msg)
+            raise Exception(f"下载超时")
         except Exception as e:
             raise Exception(f"下载失败: {str(e)}")
     
