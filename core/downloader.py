@@ -362,6 +362,8 @@ class Downloader(QObject):
             self.log_message.emit("所有文件都已存在，无需下载")
             # 确保最终进度为100%
             self.overall_progress.emit(100.0, completed_count, total_count)
+            # 修改日志消息以清楚表明这些是跳过的文件
+            self.log_message.emit(f"下载完成: 新下载 0, 跳过 {len(file_items)}, 失败 0")
             self.download_finished.emit(len(file_items), 0)
             self._is_downloading = False
             return results
@@ -449,16 +451,34 @@ class Downloader(QObject):
             self._network_config = None
             self._is_downloading = False
         
-        # 统计结果
-        success_count = sum(1 for success in results.values() if success)
-        failed_count = len(results) - success_count
+        # 统计结果 - 分别统计跳过和实际下载
+        skipped_count = len(existing_files)  # 跳过的文件数量
+        downloaded_success = 0  # 实际下载成功的文件数量
+        downloaded_failed = 0   # 下载失败的文件数量
+        
+        # 统计实际下载的文件结果
+        for filename, success in results.items():
+            # 检查是否为跳过的文件（在existing_files中）
+            is_skipped = any(item.filename == filename for item in existing_files)
+            if not is_skipped:  # 只统计实际下载的文件
+                if success:
+                    downloaded_success += 1
+                else:
+                    downloaded_failed += 1
         
         if self._is_cancelled:
             self.download_cancelled.emit()
             self.log_message.emit("下载已取消")
         else:
-            self.download_finished.emit(success_count, failed_count)
-            self.log_message.emit(f"下载完成: 成功 {success_count}, 失败 {failed_count}")
+            # 发送信号时仍然使用总成功数，保持向后兼容
+            total_success = skipped_count + downloaded_success
+            self.download_finished.emit(total_success, downloaded_failed)
+            
+            # 但日志消息要清晰区分
+            if skipped_count > 0:
+                self.log_message.emit(f"下载完成: 新下载 {downloaded_success}, 跳过 {skipped_count}, 失败 {downloaded_failed}")
+            else:
+                self.log_message.emit(f"下载完成: 成功 {downloaded_success}, 失败 {downloaded_failed}")
         
         return results
     
