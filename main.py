@@ -131,6 +131,11 @@ class DLCManagerApp:
 def main():
     """主函数"""
     try:
+        # 添加启动信息
+        print("🚀 正在启动 DLC Manager...")
+        print("📁 工作目录:", Path(__file__).parent)
+        print("-" * 50)
+        
         # 创建并运行应用程序
         app = DLCManagerApp()
         app.run()
