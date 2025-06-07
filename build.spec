@@ -86,34 +86,9 @@ a = Analysis(
 # PYZ 阶段
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-# EXE 阶段
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
-    name='DLC Manager',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,  # 禁用UPX压缩以加速构建
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,  # 不显示控制台窗口
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=str(project_root / 'resources' / 'icons' / 'app_icon.ico') if (project_root / 'resources' / 'icons' / 'app_icon.ico').exists() else None,
-    version_file=None,
-)
-
-# 多平台配置
-# macOS App 配置 (仅在 macOS 上生效)
+# 平台特定配置
 if sys.platform == 'darwin':
+    # macOS: 只生成 .app 文件 (不生成独立可执行文件)
     # 优先使用 .icns 文件，其次使用 .ico 文件
     icon_path = None
     if (project_root / 'resources' / 'icons' / 'app_icon.icns').exists():
@@ -121,6 +96,32 @@ if sys.platform == 'darwin':
     elif (project_root / 'resources' / 'icons' / 'app_icon.ico').exists():
         icon_path = str(project_root / 'resources' / 'icons' / 'app_icon.ico')
     
+    # 为 macOS app 创建内部可执行文件 (onefile 模式)
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        [],
+        name='DLC Manager',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=icon_path,
+        version_file=None,
+    )
+    
+    # macOS 应用包
     app = BUNDLE(
         exe,
         name='DLC Manager.app',
@@ -138,4 +139,30 @@ if sys.platform == 'darwin':
             'NSHighResolutionCapable': True,
             'NSRequiresAquaSystemAppearance': False,
         },
+    )
+
+else:
+    # Windows/Linux: 只生成独立可执行文件
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        [],
+        name='DLC Manager',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,  # 禁用UPX压缩以加速构建
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=False,  # 不显示控制台窗口
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=str(project_root / 'resources' / 'icons' / 'app_icon.ico') if (project_root / 'resources' / 'icons' / 'app_icon.ico').exists() else None,
+        version_file=None,
     ) 

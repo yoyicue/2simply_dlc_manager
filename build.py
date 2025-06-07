@@ -88,6 +88,13 @@ def build_app():
     if not run_command(cmd, "使用 PyInstaller 构建应用"):
         return False
     
+    # macOS: 删除多余的独立可执行文件
+    if sys.platform == "darwin":
+        standalone_exe = Path("dist/DLC Manager")
+        if standalone_exe.exists():
+            standalone_exe.unlink()
+            print("🗑️  已删除多余的独立可执行文件")
+    
     print("✅ 应用构建完成")
     return True
 
@@ -100,6 +107,10 @@ def verify_build():
         app_path = Path("dist/DLC Manager.app")
         if app_path.exists():
             print(f"✅ macOS 应用包已创建: {app_path}")
+            # 确认没有独立可执行文件
+            standalone_exe = Path("dist/DLC Manager")
+            if not standalone_exe.exists():
+                print("✅ 已优化：仅生成 .app 文件")
             return True
     else:  # Windows/Linux
         exe_path = Path("dist/DLC Manager.exe" if sys.platform == "win32" else "dist/DLC Manager")
@@ -137,15 +148,6 @@ def create_installer():
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for file_path in dist_dir.rglob("*"):
             if file_path.name != zip_name and file_path.is_file():
-                # macOS: 根据用途决定是否包含独立可执行文件
-                if sys.platform == "darwin" and file_path.name == "DLC Manager" and file_path.parent == dist_dir:
-                    # 可以通过环境变量控制是否包含独立可执行文件
-                    include_standalone = os.getenv('INCLUDE_STANDALONE', 'false').lower() == 'true'
-                    if not include_standalone:
-                        print(f"⏭️  跳过独立可执行文件 (GUI分发): {file_path.name}")
-                        print("💡 如需包含独立可执行文件，请设置环境变量: INCLUDE_STANDALONE=true")
-                        continue
-                    
                 arcname = file_path.relative_to(dist_dir)
                 zipf.write(file_path, arcname)
     
@@ -193,9 +195,8 @@ def main():
     print("1. 运行应用测试功能")
     print("2. 分发 dist/ 目录中的文件")
     if sys.platform == "darwin":
-        print("3. 普通用户双击 .app 文件运行")
-        print("4. 高级用户可使用独立可执行文件：./dist/DLC\\ Manager")
-        print("💡 包含独立可执行文件构建：INCLUDE_STANDALONE=true python build.py")
+        print("3. 用户双击 .app 文件运行")
+        print("💡 已优化：仅生成 .app 文件，减少混淆和文件大小")
     else:
         print("3. 用户可以直接运行可执行文件")
 
