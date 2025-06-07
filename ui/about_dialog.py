@@ -100,27 +100,16 @@ class AboutDialog(QDialog):
         layout.addWidget(version)
         
         # 描述
-        description = QLabel("现代化的 DLC 下载管理工具")
+        description = QLabel("***REMOVED***")
         description.setAlignment(Qt.AlignCenter)
         description.setWordWrap(True)
         description.setStyleSheet("margin: 10px; color: #333;")
         layout.addWidget(description)
         
-        # 功能特点
-        features = QLabel(
-            "• 高效的多线程下载管理\n"
-            "• 现代化的用户界面\n"
-            "• 智能的文件完整性验证\n"
-            "• 实时的下载进度监控"
-        )
-        features.setAlignment(Qt.AlignLeft)
-        features.setStyleSheet("margin: 20px; padding: 10px; background-color: #f5f5f5; border-radius: 5px;")
-        layout.addWidget(features)
-        
         layout.addStretch()
         
         # 版权信息
-        copyright_label = QLabel("© 2024 DLC Manager Team")
+        copyright_label = QLabel("© 2024 yoyicue")
         copyright_label.setAlignment(Qt.AlignCenter)
         copyright_label.setStyleSheet("color: #888; font-size: 10px;")
         layout.addWidget(copyright_label)
