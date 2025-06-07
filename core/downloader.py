@@ -33,6 +33,8 @@ class Downloader(QObject):
     download_started = Signal()  # 下载开始
     download_finished = Signal(int, int)  # 成功数量, 失败数量
     download_cancelled = Signal()  # 下载取消
+    # 新增信号：通知UI更新统计信息
+    statistics_update_requested = Signal()  # 请求UI更新统计信息
     
     def __init__(self, config: Optional[DownloadConfig] = None):
         super().__init__()
@@ -328,6 +330,9 @@ class Downloader(QObject):
                 overall_progress = (completed_count / total_count) * 100
                 self.overall_progress.emit(overall_progress, completed_count, total_count)
                 
+                # 阶段二优化：实时更新统计信息，避免数字跳动
+                self.statistics_update_requested.emit()
+                
                 # 智能进度报告：只在重要节点输出日志
                 progress_ratio = batch_end / len(existing_files)
                 should_log = (
@@ -352,6 +357,9 @@ class Downloader(QObject):
             
             # 汇总信息，替代逐个文件的日志
             self.log_message.emit(f"✅ 批量跳过 {len(existing_files)} 个已存在文件，节省下载时间")
+            
+            # 阶段二优化：批量处理完成后最终更新统计信息
+            self.statistics_update_requested.emit()
         
         skipped_count = len(existing_files)
         
@@ -362,6 +370,8 @@ class Downloader(QObject):
             self.log_message.emit("所有文件都已存在，无需下载")
             # 确保最终进度为100%
             self.overall_progress.emit(100.0, completed_count, total_count)
+            # 阶段二优化：所有文件都已存在时最终更新统计信息
+            self.statistics_update_requested.emit()
             # 修改日志消息以清楚表明这些是跳过的文件
             self.log_message.emit(f"下载完成: 新下载 0, 跳过 {len(file_items)}, 失败 0")
             self.download_finished.emit(len(file_items), 0)
@@ -473,6 +483,9 @@ class Downloader(QObject):
             # 发送信号时仍然使用总成功数，保持向后兼容
             total_success = skipped_count + downloaded_success
             self.download_finished.emit(total_success, downloaded_failed)
+            
+            # 阶段二优化：下载完成后最终更新统计信息
+            self.statistics_update_requested.emit()
             
             # 但日志消息要清晰区分
             if skipped_count > 0:
@@ -730,6 +743,9 @@ class Downloader(QObject):
             f"{len(likely_existing)} 个需要进一步分析"
         )
         
+        # 阶段二优化：Bloom Filter完成后立即更新统计信息
+        self.statistics_update_requested.emit()
+        
         existing_files = []
         files_to_download = list(definitely_new)  # 确定不存在的文件直接归类
         
@@ -739,6 +755,9 @@ class Downloader(QObject):
             
             cache_analysis = data_manager.analyze_cache_reliability(likely_existing, output_dir)
             self.log_message.emit(f"📊 缓存分析: {cache_analysis['reason']}")
+            
+            # 阶段二优化：缓存分析完成后更新统计信息
+            self.statistics_update_requested.emit()
             
             # 第三阶段：根据缓存可靠性选择最优精确检查策略
             self.log_message.emit(f"🔍 阶段3: 精确检查策略选择...")
@@ -767,6 +786,9 @@ class Downloader(QObject):
             f"缓存处理 {cache_processed} 个文件, "
             f"误判率 {filter_info['estimated_false_positive']:.2%}"
         )
+        
+        # 阶段二优化：三阶段完成后最终更新统计信息
+        self.statistics_update_requested.emit()
         
         return existing_files, files_to_download
     

@@ -449,6 +449,8 @@ class MainWindow(QMainWindow):
             self.downloader.download_started.connect(self._on_download_started)
             self.downloader.download_finished.connect(self._on_download_finished)
             self.downloader.download_cancelled.connect(self._on_download_cancelled)
+            # 阶段二优化：连接统计信息更新信号，避免数字跳动
+            self.downloader.statistics_update_requested.connect(self._update_statistics)
 
             # 开始下载
             self._log(f"开始下载 {len(checked_items)} 个文件到 {self.current_output_dir}")
