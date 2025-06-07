@@ -4,7 +4,7 @@
 import asyncio
 import aiofiles
 from pathlib import Path
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Any
 from PySide6.QtCore import QObject, Signal, QModelIndex
 import os  # 局部导入, 避免顶层不必要依赖
 
@@ -17,6 +17,7 @@ try:
     AIOHTTP_AVAILABLE = True
 except ImportError:
     AIOHTTP_AVAILABLE = False
+    aiohttp = None  # 设置为None以避免NameError
 
 
 class Downloader(QObject):
@@ -43,7 +44,7 @@ class Downloader(QObject):
         self._http2_enabled = False
         
         # 向后兼容的会话
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._session: Optional[Any] = None
         
         # 下载状态
         self._is_cancelled = False

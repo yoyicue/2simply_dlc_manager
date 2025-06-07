@@ -13,7 +13,12 @@ try:
     HTTPX_AVAILABLE = True
 except ImportError:
     HTTPX_AVAILABLE = False
+
+try:
     import aiohttp
+    AIOHTTP_AVAILABLE = True
+except ImportError:
+    AIOHTTP_AVAILABLE = False
 
 
 @dataclass
@@ -49,9 +54,11 @@ class AsyncHttpClient:
         if HTTPX_AVAILABLE and self.config.use_http2:
             # 使用 httpx 的 HTTP/2 支持
             await self._init_httpx_client()
-        else:
+        elif AIOHTTP_AVAILABLE:
             # 降级到 aiohttp HTTP/1.1
             await self._init_aiohttp_client()
+        else:
+            raise ImportError("Neither httpx nor aiohttp is available")
             
         return self
         
@@ -85,6 +92,9 @@ class AsyncHttpClient:
         
     async def _init_aiohttp_client(self):
         """降级到 aiohttp HTTP/1.1 客户端"""
+        if not AIOHTTP_AVAILABLE:
+            raise ImportError("aiohttp is not available")
+            
         timeout = aiohttp.ClientTimeout(
             total=self.config.timeout_seconds,
             connect=self.config.connect_timeout,

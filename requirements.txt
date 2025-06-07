@@ -1,8 +1,11 @@
 # 核心依赖 - GUI框架和异步库
-PySide6==6.7.0
-aiohttp==3.9.5
-qasync==0.27.1
-aiofiles==23.2.1
+PySide6>=6.8.0
+aiohttp>=3.9.5
+qasync>=0.27.1
+aiofiles>=23.2.1
+
+# HTTP/2 网络优化依赖
+httpx[http2]>=0.24.0
 
 # 构建和图标处理
 pyinstaller>=5.0.0
