@@ -11,6 +11,7 @@ import os  # 局部导入, 避免顶层不必要依赖
 from .models import FileItem, DownloadStatus, DownloadConfig
 from .network import NetworkManager, AsyncHttpClient, NetworkConfig
 from .resume import SmartResume
+from .compression import CompressionManager
 
 # 向后兼容的导入
 try:
@@ -52,6 +53,14 @@ class Downloader(QObject):
             self.log_message.emit("⚡ 智能断点续传已启用")
         else:
             self.smart_resume = None
+            
+        # 第三阶段：压缩传输优化
+        if self.config.enable_compression_optimization:
+            compression_config = self.config.create_compression_config()
+            self.compression_manager = CompressionManager(compression_config)
+            self.log_message.emit("📦 压缩传输优化已启用")
+        else:
+            self.compression_manager = None
             
         # 向后兼容的会话
         self._session: Optional[Any] = None
@@ -484,6 +493,28 @@ class Downloader(QObject):
             total_success = skipped_count + downloaded_success
             self.download_finished.emit(total_success, downloaded_failed)
             
+            # 第三阶段：输出压缩优化统计
+            if self.compression_manager and downloaded_success > 0:
+                compression_summary = self.compression_manager.get_session_summary()
+                compression_stats = compression_summary['compression_stats']
+                
+                if compression_stats['files_processed'] > 0:
+                    self.log_message.emit(
+                        f"📦 压缩传输统计: 处理了 {compression_stats['files_processed']} 个文件, "
+                        f"节省传输 {compression_stats['overall_savings_mb']:.1f}MB "
+                        f"({compression_stats['overall_savings_percent']:.1f}%)"
+                    )
+                    
+                    # 详细的文件类型统计
+                    category_breakdown = compression_stats.get('category_breakdown', {})
+                    for category, stats in category_breakdown.items():
+                        if stats['files'] > 0:
+                            self.log_message.emit(
+                                f"  📊 {category}: {stats['files']} 个文件, "
+                                f"平均节省 {stats['avg_savings_percent']:.1f}%, "
+                                f"总节省 {stats['total_savings_mb']:.1f}MB"
+                            )
+            
             # 阶段二优化：下载完成后最终更新统计信息
             self.statistics_update_requested.emit()
             
@@ -544,7 +575,7 @@ class Downloader(QObject):
             return False
     
     async def _download_with_progress(self, file_item: FileItem, url: str, local_path: Path) -> bool:
-        """带进度的下载 - HTTP/2 + 智能断点续传版本"""
+        """带进度的下载 - HTTP/2 + 智能断点续传 + 压缩优化版本"""
         try:
             # 第二阶段：智能断点续传优先
             if (self.smart_resume and 
@@ -567,11 +598,157 @@ class Downloader(QObject):
                 else:
                     self.log_message.emit(f"⚠️  断点续传失败，回退到完整下载: {file_item.filename}")
             
-            # 降级到原有完整下载逻辑
-            return await self._original_download_with_progress(file_item, url, local_path)
+            # 第三阶段：压缩优化的完整下载
+            return await self._optimized_download_with_compression(file_item, url, local_path)
             
         except Exception as e:
             self.log_message.emit(f"下载失败: {file_item.filename} - {str(e)}")
+            raise Exception(f"下载失败: {str(e)}")
+    
+    async def _optimized_download_with_compression(self, file_item: FileItem, url: str, local_path: Path) -> bool:
+        """第三阶段：压缩优化的下载方法"""
+        try:
+            # 使用自适应块大小
+            adaptive_chunk_size = self.config.get_adaptive_chunk_size(file_item)
+            
+            # 第三阶段：智能压缩请求头优化
+            if self.compression_manager:
+                # 分析文件类型和优化需求
+                file_analysis = self.compression_manager.analyze_file_requirements(file_item)
+                headers = file_analysis['optimal_headers']
+                
+                # 记录优化策略
+                if file_analysis['estimated_savings']['estimated_savings_percent'] > 0:
+                    estimated_savings = file_analysis['estimated_savings']['estimated_savings_percent']
+                    self.log_message.emit(
+                        f"📦 {file_item.filename} 启用{file_analysis['category']}优化 "
+                        f"(预计节省{estimated_savings:.0f}%传输)"
+                    )
+            else:
+                # 降级到基础请求头
+                headers = {}
+                if file_item.filename.endswith('.json'):
+                    headers['Accept-Encoding'] = 'gzip, br, deflate'
+            
+            # 使用网络客户端进行流式下载
+            async with self._http_client.stream_download(url, headers) as response:
+                if response.status_code != 200:
+                    raise Exception(f"HTTP {response.status_code}")
+                
+                # 获取响应信息
+                content_encoding = response.headers.get('content-encoding')
+                if response.content_length:
+                    file_item.size = response.content_length
+                
+                # 检测协议版本
+                protocol_info = "HTTP/2" if self._http2_enabled else "HTTP/1.1"
+                
+                # 第三阶段：检查是否需要流式优化
+                if (self.compression_manager and 
+                    self.compression_manager.streaming.should_use_streaming(file_item)):
+                    
+                    # 使用PNG流式传输优化
+                    streaming_success = await self.compression_manager.optimize_download(
+                        response, file_item, local_path, 
+                        lambda msg: self.log_message.emit(msg)
+                    )
+                    
+                    if streaming_success:
+                        # 流式传输成功，标记完成
+                        file_item.mark_completed(local_path)
+                        file_item.update_disk_metadata(local_path)
+                        self._update_bloom_filter_on_completion(file_item)
+                        
+                        compression_info = "流式传输优化" if content_encoding else "流式传输"
+                        self.log_message.emit(f"✅ {protocol_info} {file_item.filename} 下载完成 "
+                                            f"({file_item.size/1024:.1f}KB, {compression_info})")
+                        
+                        self.file_completed.emit(file_item.filename, True, "流式下载成功")
+                        return True
+                
+                # 常规下载流程
+                if file_item.is_binary_file:
+                    # 二进制文件 - 流式下载
+                    response_data = b''
+                    downloaded = 0
+                    
+                    async for chunk in response.iter_chunks(adaptive_chunk_size):
+                        if self._is_cancelled:
+                            return False
+                        
+                        response_data += chunk
+                        downloaded += len(chunk)
+                        
+                        # 更新进度
+                        if file_item.size:
+                            progress = (downloaded / file_item.size) * 100
+                            file_item.progress = progress
+                            file_item.downloaded_size = downloaded
+                            self.progress_updated.emit(file_item.filename, progress)
+                    
+                    # 第三阶段：处理压缩响应数据
+                    if self.compression_manager and content_encoding:
+                        processed_data = await self.compression_manager.process_response_data(
+                            response_data, content_encoding, file_item,
+                            lambda msg: self.log_message.emit(msg)
+                        )
+                    else:
+                        processed_data = response_data
+                    
+                    # 写入文件
+                    async with aiofiles.open(local_path, 'wb') as f:
+                        await f.write(processed_data)
+                    
+                else:
+                    # 文本文件 - JSON压缩优化处理
+                    response_data = b''
+                    async for chunk in response.iter_chunks(adaptive_chunk_size):
+                        if self._is_cancelled:
+                            return False
+                        response_data += chunk
+                    
+                    # 第三阶段：处理压缩的JSON响应
+                    if self.compression_manager and content_encoding:
+                        processed_data = await self.compression_manager.process_response_data(
+                            response_data, content_encoding, file_item,
+                            lambda msg: self.log_message.emit(msg)
+                        )
+                    else:
+                        processed_data = response_data
+                    
+                    # 解码并写入文件
+                    try:
+                        content = processed_data.decode('utf-8')
+                    except UnicodeDecodeError:
+                        content = processed_data.decode('utf-8', errors='replace')
+                    
+                    async with aiofiles.open(local_path, 'w', encoding='utf-8') as f:
+                        await f.write(content)
+                    
+                    file_item.progress = 100.0
+                    self.progress_updated.emit(file_item.filename, 100.0)
+                
+                # 标记完成
+                file_item.mark_completed(local_path)
+                file_item.update_disk_metadata(local_path)
+                self._update_bloom_filter_on_completion(file_item)
+                
+                # 记录下载性能信息
+                if file_item.size:
+                    file_type = "大文件" if file_item.size > self.config.large_file_threshold else "小文件" if file_item.size < self.config.small_file_threshold else "中等文件"
+                    compression_info = f"{content_encoding.upper()}压缩" if content_encoding else "原始传输"
+                    resume_info = "断点续传" if self.config.enable_resume else "完整下载"
+                    optimization_info = "压缩优化" if self.compression_manager else "标准传输"
+                    
+                    self.log_message.emit(f"✅ {protocol_info} {file_type} {file_item.filename} 下载完成 "
+                                        f"({file_item.size/1024:.1f}KB, {compression_info}, {optimization_info}, 块大小:{adaptive_chunk_size/1024:.1f}KB)")
+                
+                self.file_completed.emit(file_item.filename, True, "下载成功")
+                return True
+                
+        except asyncio.TimeoutError:
+            raise Exception(f"下载超时")
+        except Exception as e:
             raise Exception(f"下载失败: {str(e)}")
     
     async def _original_download_with_progress(self, file_item: FileItem, url: str, local_path: Path) -> bool:

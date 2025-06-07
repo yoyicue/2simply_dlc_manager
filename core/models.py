@@ -164,6 +164,12 @@ class DownloadConfig:
     recovery_base_delay: float = 1.0  # 基础重试延迟
     network_error_threshold: int = 3  # 网络错误阈值
     
+    # 第三阶段：压缩传输优化配置
+    enable_compression_optimization: bool = True  # 启用压缩传输优化
+    force_json_compression: bool = True  # 强制JSON文件压缩
+    enable_png_streaming: bool = True  # 启用PNG流式传输
+    compression_performance_tracking: bool = True  # 压缩性能跟踪
+    
     def __post_init__(self):
         """验证配置参数"""
         if self.concurrent_requests <= 0:
@@ -320,4 +326,17 @@ class DownloadConfig:
             read_timeout=min(60, self.timeout // 3),
             enable_performance_tracking=True,
             connection_pool_stats=True
+        )
+    
+    def create_compression_config(self) -> 'CompressionConfig':
+        """根据下载配置创建压缩配置"""
+        from .compression import CompressionConfig
+        
+        return CompressionConfig(
+            force_json_compression=self.force_json_compression,
+            enable_png_optimization=self.enable_png_streaming,
+            enable_performance_tracking=self.compression_performance_tracking,
+            # 根据网络配置调整压缩参数
+            stream_chunk_size=self.chunk_size,  # 使用相同的块大小
+            compression_level=6 if self.use_http2 else 4  # HTTP/2时用更高压缩
         ) 

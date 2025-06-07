@@ -6,6 +6,7 @@ from .downloader import Downloader
 from .persistence import DataManager
 from .network import NetworkManager, AsyncHttpClient, NetworkConfig
 from .resume import SmartResume, ResumeManager, NetworkRecovery
+from .compression import CompressionManager, CompressionConfig, FileTypeAnalyzer
 from .utils import (
     get_user_data_dir, get_user_cache_dir, get_user_config_dir,
     get_app_data_file, get_app_cache_file, is_running_from_bundle,
@@ -24,6 +25,10 @@ __all__ = [
     'SmartResume',
     'ResumeManager',
     'NetworkRecovery',
+    # 第三阶段：压缩传输优化
+    'CompressionManager',
+    'CompressionConfig',
+    'FileTypeAnalyzer',
     'get_user_data_dir',
     'get_user_cache_dir', 
     'get_user_config_dir',
