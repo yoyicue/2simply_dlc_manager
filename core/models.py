@@ -15,6 +15,15 @@ class DownloadStatus(Enum):
     FAILED = "失败"
     CANCELLED = "已取消"
     SKIPPED = "已跳过"
+    VERIFY_FAILED = "验证失败"  # MD5验证失败，需要重新下载
+
+
+class MD5VerifyStatus(Enum):
+    """MD5验证状态枚举"""
+    NOT_VERIFIED = "未验证"
+    VERIFYING = "验证中"
+    VERIFIED_SUCCESS = "验证成功"
+    VERIFIED_FAILED = "验证失败"
 
 
 @dataclass
@@ -35,6 +44,11 @@ class FileItem:
     disk_verified: bool = False  # 磁盘验证标记
     last_checked: Optional[str] = None  # 最后检查时间 ISO格式
     cache_version: str = "1.0"  # 缓存版本号
+    
+    # MD5验证状态字段
+    md5_verify_status: MD5VerifyStatus = MD5VerifyStatus.NOT_VERIFIED
+    md5_verify_time: Optional[str] = None  # MD5验证时间 ISO格式
+    calculated_md5: Optional[str] = None  # 计算得到的MD5值
     
     @property
     def file_extension(self) -> str:
@@ -81,6 +95,8 @@ class FileItem:
         if local_path.exists():
             self.size = local_path.stat().st_size
             self.downloaded_size = self.size
+        # 重新下载成功后，重置MD5验证状态，需要重新验证
+        self.reset_md5_verify_status()
     
     def mark_failed(self, error_message: str):
         """标记为下载失败"""
@@ -128,6 +144,28 @@ class FileItem:
                    self.size == stat_info.st_size)
         except:
             return False
+    
+    def mark_md5_verifying(self):
+        """标记为MD5验证中"""
+        self.md5_verify_status = MD5VerifyStatus.VERIFYING
+        from datetime import datetime
+        self.md5_verify_time = datetime.now().isoformat()
+    
+    def mark_md5_verified(self, calculated_md5: str, is_success: bool):
+        """标记MD5验证完成"""
+        self.calculated_md5 = calculated_md5
+        self.md5_verify_status = (
+            MD5VerifyStatus.VERIFIED_SUCCESS if is_success 
+            else MD5VerifyStatus.VERIFIED_FAILED
+        )
+        from datetime import datetime
+        self.md5_verify_time = datetime.now().isoformat()
+    
+    def reset_md5_verify_status(self):
+        """重置MD5验证状态"""
+        self.md5_verify_status = MD5VerifyStatus.NOT_VERIFIED
+        self.md5_verify_time = None
+        self.calculated_md5 = None
 
 
 @dataclass

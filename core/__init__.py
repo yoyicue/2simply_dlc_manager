@@ -1,7 +1,7 @@
 """
 核心模块 - HTTP/2 优化版本
 """
-from .models import FileItem, DownloadStatus, DownloadConfig
+from .models import FileItem, DownloadStatus, DownloadConfig, MD5VerifyStatus
 from .downloader import Downloader
 from .persistence import DataManager
 from .network import NetworkManager, AsyncHttpClient, NetworkConfig
@@ -17,6 +17,7 @@ __all__ = [
     'FileItem',
     'DownloadStatus', 
     'DownloadConfig',
+    'MD5VerifyStatus',
     'Downloader',
     'DataManager',
     'NetworkManager',

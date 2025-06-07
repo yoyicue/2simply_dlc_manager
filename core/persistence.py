@@ -4,7 +4,7 @@
 import json
 from pathlib import Path
 from typing import List, Dict, Optional, Any
-from .models import FileItem, DownloadStatus
+from .models import FileItem, DownloadStatus, MD5VerifyStatus
 from .utils import get_app_data_file, ensure_writable_path, is_running_from_bundle
 
 
@@ -189,7 +189,11 @@ class DataManager:
                     'mtime': item.mtime,
                     'disk_verified': item.disk_verified,
                     'last_checked': item.last_checked,
-                    'cache_version': item.cache_version
+                    'cache_version': item.cache_version,
+                    # MD5验证状态字段
+                    'md5_verify_status': item.md5_verify_status.value,
+                    'md5_verify_time': item.md5_verify_time,
+                    'calculated_md5': item.calculated_md5
                 }
                 state_data['files'].append(file_data)
             
@@ -241,6 +245,17 @@ class DataManager:
                     last_checked=file_data.get('last_checked'),
                     cache_version=file_data.get('cache_version', '1.0')
                 )
+                
+                # 加载MD5验证状态（向后兼容）
+                md5_verify_status_str = file_data.get('md5_verify_status', 'NOT_VERIFIED')
+                for verify_status in MD5VerifyStatus:
+                    if verify_status.value == md5_verify_status_str:
+                        item.md5_verify_status = verify_status
+                        break
+                
+                item.md5_verify_time = file_data.get('md5_verify_time')
+                item.calculated_md5 = file_data.get('calculated_md5')
+                
                 file_items.append(item)
             
             # 阶段二新增：自动构建Bloom Filter
@@ -272,7 +287,8 @@ class DataManager:
             'completed': 0,
             'failed': 0,
             'cancelled': 0,
-            'skipped': 0
+            'skipped': 0,
+            'verify_failed': 0  # 新增：验证失败的统计
         }
         
         for item in file_items:
@@ -288,6 +304,8 @@ class DataManager:
                 stats['cancelled'] += 1
             elif item.status == DownloadStatus.SKIPPED:
                 stats['skipped'] += 1
+            elif item.status == DownloadStatus.VERIFY_FAILED:
+                stats['verify_failed'] += 1
         
         return stats
     

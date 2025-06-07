@@ -5,7 +5,7 @@ from typing import List, Any, Optional
 from PySide6.QtCore import QAbstractTableModel, Qt, QModelIndex, Signal
 from PySide6.QtGui import QColor
 
-from core import FileItem, DownloadStatus
+from core import FileItem, DownloadStatus, MD5VerifyStatus
 
 
 class FileTableModel(QAbstractTableModel):
@@ -69,6 +69,7 @@ class FileTableModel(QAbstractTableModel):
                 self.index(row, 0),
                 self.index(row, self.columnCount() - 1)
             )
+            
         except ValueError:
             # 如果文件不在过滤后的视图中，则无需更新
             pass
@@ -165,7 +166,7 @@ class FileTableModel(QAbstractTableModel):
         elif role == Qt.CheckStateRole and column_key == "checked":
             return Qt.Checked if index.row() in self._checked_items else Qt.Unchecked
         elif role == Qt.BackgroundRole:
-            return self._get_background_color(file_item)
+            return self._get_background_color(file_item, column_key)
         elif role == Qt.ToolTipRole:
             return self._get_tooltip(file_item, column_key)
         
@@ -236,16 +237,21 @@ class FileTableModel(QAbstractTableModel):
         
         return ""
     
-    def _get_background_color(self, file_item: FileItem) -> Optional[QColor]:
-        """根据状态获取背景色"""
+    def _get_background_color(self, file_item: FileItem, column_key: str) -> Optional[QColor]:
+        """根据下载状态获取背景色"""
+        # 所有列根据下载状态显示颜色
         if file_item.status == DownloadStatus.COMPLETED:
-            return QColor(200, 255, 200)  # 浅绿色
+            return QColor(200, 255, 200)  # 浅绿色 - 已完成
         elif file_item.status == DownloadStatus.FAILED:
-            return QColor(255, 200, 200)  # 浅红色
+            return QColor(255, 200, 200)  # 浅红色 - 下载失败
+        elif file_item.status == DownloadStatus.VERIFY_FAILED:
+            return QColor(255, 180, 100)  # 橙色 - 验证失败
         elif file_item.status == DownloadStatus.DOWNLOADING:
-            return QColor(200, 200, 255)  # 浅蓝色
+            return QColor(200, 200, 255)  # 浅蓝色 - 下载中
         elif file_item.status == DownloadStatus.SKIPPED:
-            return QColor(255, 255, 200)  # 浅黄色
+            return QColor(255, 255, 200)  # 浅黄色 - 已跳过
+        elif file_item.status == DownloadStatus.CANCELLED:
+            return QColor(220, 220, 220)  # 浅灰色 - 已取消
         
         return None
     
@@ -255,8 +261,11 @@ class FileTableModel(QAbstractTableModel):
             return f"完整文件名: {file_item.full_filename}"
         elif column_key == "md5":
             return f"完整MD5: {file_item.md5}"
-        elif column_key == "status" and file_item.error_message:
-            return f"错误: {file_item.error_message}"
+        elif column_key == "status":
+            tooltip = f"状态: {file_item.status.value}"
+            if file_item.error_message:
+                tooltip += f"\n错误: {file_item.error_message}"
+            return tooltip
         elif column_key == "local_path" and file_item.local_path:
             return str(file_item.local_path)
         
