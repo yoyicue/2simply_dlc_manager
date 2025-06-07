@@ -151,29 +151,46 @@ class AboutDialog(QDialog):
         except ImportError:
             pass
         
-        # 添加依赖库版本
-        dependencies = []
-        try:
-            import aiohttp
-            dependencies.append(f"aiohttp: {aiohttp.__version__}")
-        except ImportError:
-            pass
+        # 添加核心依赖信息（只显示真正重要的）
+        core_dependencies = []
         
-        try:
-            import qasync
-            dependencies.append(f"qasync: {qasync.__version__}")
-        except ImportError:
-            pass
+        # 获取库版本的安全函数（避免pkg_resources依赖问题）
+        def get_package_version(package_name):
+            try:
+                # 直接导入模块获取版本
+                if package_name == "PySide6":
+                    import PySide6
+                    return getattr(PySide6, '__version__', '已安装')
+                elif package_name == "aiohttp":
+                    import aiohttp
+                    return getattr(aiohttp, '__version__', '已安装')
+                elif package_name == "qasync":
+                    import qasync
+                    return getattr(qasync, '__version__', '已安装')
+                else:
+                    return "已安装"
+            except ImportError:
+                return "未安装"
+            except:
+                return "已安装"
         
-        try:
-            import rich
-            dependencies.append(f"rich: {rich.__version__}")
-        except ImportError:
-            pass
+        # 只显示核心功能依赖
+        core_libs = [
+            ("PySide6", "Qt GUI框架"),
+            ("aiohttp", "异步HTTP客户端"),
+            ("qasync", "Qt异步事件循环")
+        ]
         
-        if dependencies:
-            info_text += "<h4>依赖库版本:</h4>"
-            for dep in dependencies:
+        for lib_name, description in core_libs:
+            try:
+                version = get_package_version(lib_name)
+                core_dependencies.append(f"{lib_name}: {version}")
+            except:
+                pass
+        
+        if core_dependencies:
+            info_text += "<h4>核心依赖:</h4>"
+            for dep in core_dependencies:
                 info_text += f"<p>• {dep}</p>"
         
         system_info.setHtml(info_text)
