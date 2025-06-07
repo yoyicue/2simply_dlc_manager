@@ -143,5 +143,4 @@ dlc_download_state.json
 logs/
 *.zip
 
-# Temporary files
-create_icon.py 
+# Temporary files 
