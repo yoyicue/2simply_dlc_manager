@@ -78,34 +78,50 @@ class Downloader(QObject):
             return await self._optimized_full_scan(file_items, output_dir)
     
     async def _cache_based_check(self, file_items: List[FileItem], output_dir: Path) -> tuple[List[FileItem], List[FileItem]]:
-        """基于缓存的快速检查"""
-        self.log_message.emit("⚡ 执行基于缓存的快速检查...")
+        """基于缓存的快速检查 - 带兜底磁盘验证"""
+        self.log_message.emit("⚡ 执行基于缓存的快速检查（含兜底验证）...")
         
         existing_files = []
         files_to_download = []
+        need_verification = []  # 缓存可信但需要兜底验证的文件
         total_files = len(file_items)
         
+        # 第一轮：基于缓存快速分类
         for idx, item in enumerate(file_items):
             if self._is_cancelled:
                 break
             
             file_path = output_dir / item.full_filename
             
-            # 如果缓存标记为已验证且未过期，直接信任缓存
+            # 如果缓存标记为已验证且未过期，加入兜底验证队列
             if (item.status == DownloadStatus.COMPLETED and 
                 item.disk_verified and 
                 item.is_cache_valid(file_path)):
-                existing_files.append(item)
+                need_verification.append(item)
             else:
                 files_to_download.append(item)
             
             # 定期更新进度
             if idx % 500 == 0 or idx == total_files - 1:
-                progress_percent = (idx / total_files) * 100
+                progress_percent = (idx / total_files) * 50  # 缓存检查占50%进度
                 self.check_progress.emit(progress_percent)
                 await asyncio.sleep(0)
         
-        self.log_message.emit(f"✅ 缓存检查完成: {len(existing_files)} 个文件可信任缓存")
+        # 第二轮：兜底磁盘验证（即使缓存可信也要验证，防止文件被删除）
+        if need_verification:
+            self.log_message.emit(f"🔍 兜底验证 {len(need_verification)} 个缓存可信文件...")
+            
+            verified_existing, verified_missing = await self._parallel_verify_files(
+                need_verification, output_dir, progress_offset=50
+            )
+            
+            existing_files.extend(verified_existing)
+            files_to_download.extend(verified_missing)
+            
+            if verified_missing:
+                self.log_message.emit(f"⚠️  发现 {len(verified_missing)} 个缓存过期文件（文件实际不存在）")
+        
+        self.log_message.emit(f"✅ 缓存+验证检查完成: {len(existing_files)} 个文件确认存在")
         return existing_files, files_to_download
     
     async def _smart_incremental_check(self, file_items: List[FileItem], output_dir: Path, 
@@ -150,7 +166,7 @@ class Downloader(QObject):
         self.log_message.emit(f"✅ 增量检查完成: 信任 {len(existing_files)} 个，需验证 {len(items_need_verification)} 个")
         return existing_files, files_to_download
     
-    async def _parallel_verify_files(self, file_items: List[FileItem], output_dir: Path) -> tuple[List[FileItem], List[FileItem]]:
+    async def _parallel_verify_files(self, file_items: List[FileItem], output_dir: Path, progress_offset: float = 0) -> tuple[List[FileItem], List[FileItem]]:
         """并行验证文件存在性和元数据"""
         from concurrent.futures import ThreadPoolExecutor
         import os
@@ -210,9 +226,10 @@ class Downloader(QObject):
                     else:
                         files_to_download.append(item)
                 
-                # 更新进度
-                progress = ((batch_idx + 1) / total_batches) * 100
-                self.check_progress.emit(progress)
+                # 更新进度（支持偏移）
+                batch_progress = ((batch_idx + 1) / total_batches) * 50  # 验证阶段占50%
+                total_progress = progress_offset + batch_progress
+                self.check_progress.emit(total_progress)
                 await asyncio.sleep(0)
         
         return existing_files, files_to_download
