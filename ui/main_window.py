@@ -380,6 +380,13 @@ class MainWindow(QMainWindow):
                 self._log(f"🔄 检测到 {diff_info['updated']} 个文件有更新，已重置下载状态")
             if diff_info['removed'] > 0:
                 self._log(f"⚠️  {diff_info['removed']} 个文件在新映射中不存在，已从列表移除")
+            
+            # 阶段二新增：显示Bloom Filter信息
+            bloom_info = self.data_manager.get_bloom_filter_info()
+            if bloom_info:
+                self._log(f"🔍 Bloom Filter已就绪: {bloom_info['actual_items']}个文件, "
+                         f"{bloom_info['memory_usage_kb']:.1f}KB内存, "
+                         f"{bloom_info['efficiency']:.1f}%效率")
             self._update_ui_state()
             self._update_statistics()
             self.status_label.setText("BigFilesMD5s.json加载完成")
@@ -442,7 +449,7 @@ class MainWindow(QMainWindow):
 
             # 开始下载
             self._log(f"开始下载 {len(checked_items)} 个文件到 {self.current_output_dir}")
-            await self.downloader.download_files(checked_items, self.current_output_dir)
+            await self.downloader.download_files(checked_items, self.current_output_dir, self.data_manager)
             
         except Exception as e:
             error_msg = f"下载过程中发生错误: {str(e)}"

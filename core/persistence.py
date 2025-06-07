@@ -12,6 +12,42 @@ class DataManager:
     
     def __init__(self, data_file: Optional[Path] = None):
         self.data_file = data_file or Path("dlc_download_state.json")
+        # 阶段二新增：Bloom Filter缓存
+        self.bloom_filter = None
+        self._bloom_enabled = True
+    
+    def enable_bloom_filter(self, enabled: bool = True):
+        """启用/禁用Bloom Filter"""
+        self._bloom_enabled = enabled
+        if not enabled:
+            self.bloom_filter = None
+    
+    def build_bloom_filter(self, file_items: List[FileItem]) -> Optional[Dict[str, Any]]:
+        """构建Bloom Filter缓存"""
+        if not self._bloom_enabled:
+            return None
+        
+        try:
+            from utils.bloom_filter import FileBloomFilter
+            
+            # 创建文件专用Bloom Filter
+            self.bloom_filter = FileBloomFilter(expected_files=len(file_items))
+            
+            # 从已完成文件构建
+            build_info = self.bloom_filter.build_from_completed_files(file_items)
+            
+            return build_info
+            
+        except Exception as e:
+            print(f"构建Bloom Filter失败: {e}")
+            self.bloom_filter = None
+            return None
+    
+    def get_bloom_filter_info(self) -> Optional[Dict[str, Any]]:
+        """获取Bloom Filter信息"""
+        if self.bloom_filter and self.bloom_filter.is_cache_valid():
+            return self.bloom_filter.get_info()
+        return None
     
     def load_file_mapping(self, json_file: Path) -> List[FileItem]:
         """从BigFilesMD5s.json加载文件映射"""
@@ -189,6 +225,16 @@ class DataManager:
                     cache_version=file_data.get('cache_version', '1.0')
                 )
                 file_items.append(item)
+            
+            # 阶段二新增：自动构建Bloom Filter
+            if file_items and self._bloom_enabled:
+                try:
+                    bloom_info = self.build_bloom_filter(file_items)
+                    if bloom_info:
+                        print(f"🔍 Bloom Filter构建完成: {bloom_info['completed_files_count']}个文件, "
+                              f"{bloom_info['memory_usage_kb']:.1f}KB内存")
+                except Exception as e:
+                    print(f"Bloom Filter构建失败: {e}")
             
             return file_items, output_dir
             
