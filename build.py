@@ -199,6 +199,11 @@ def main():
         print("💡 已优化：仅生成 .app 文件，减少混淆和文件大小")
     else:
         print("3. 用户可以直接运行可执行文件")
+    
+    print("\n🔧 技术特性:")
+    print("✅ 智能持久化：自动选择合适的用户数据目录")
+    print("✅ 跨平台兼容：支持 Windows、macOS、Linux 标准目录")
+    print("✅ 权限友好：避免只读文件系统错误")
 
 if __name__ == "__main__":
     main() 

@@ -5,13 +5,25 @@ import json
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from .models import FileItem, DownloadStatus
+from .utils import get_app_data_file, ensure_writable_path, is_running_from_bundle
 
 
 class DataManager:
     """数据管理器"""
     
     def __init__(self, data_file: Optional[Path] = None):
-        self.data_file = data_file or Path("dlc_download_state.json")
+        # 如果没有指定文件路径，自动选择合适的位置
+        if data_file is None:
+            if is_running_from_bundle():
+                # 打包应用：使用用户数据目录
+                self.data_file = get_app_data_file("dlc_download_state.json")
+            else:
+                # 开发环境：优先使用当前目录，如果不可写则使用用户数据目录
+                self.data_file = ensure_writable_path(Path("dlc_download_state.json"))
+        else:
+            # 用户指定的路径：确保可写
+            self.data_file = ensure_writable_path(data_file)
+        
         # 阶段二新增：Bloom Filter缓存
         self.bloom_filter = None
         self._bloom_enabled = True
@@ -153,7 +165,7 @@ class DataManager:
             from datetime import datetime
             
             state_data = {
-                'output_dir': str(output_dir),
+                'output_dir': str(output_dir) if output_dir else None,
                 # 阶段一新增：缓存元数据
                 'metadata_version': '1.0',
                 'last_full_scan': datetime.now().isoformat(),
@@ -197,7 +209,12 @@ class DataManager:
         try:
             state_data = json.loads(self.data_file.read_text(encoding='utf-8'))
             
-            output_dir = Path(state_data.get('output_dir', '')) if state_data.get('output_dir') else None
+            # 处理 output_dir，注意字符串 "None" 的情况
+            output_dir_str = state_data.get('output_dir', '')
+            if output_dir_str and output_dir_str != 'None':
+                output_dir = Path(output_dir_str)
+            else:
+                output_dir = None
             file_items = []
             
             for file_data in state_data.get('files', []):

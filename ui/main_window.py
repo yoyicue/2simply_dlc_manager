@@ -308,6 +308,9 @@ class MainWindow(QMainWindow):
     async def _load_saved_state(self):
         """加载保存的状态"""
         try:
+            # 记录数据文件位置
+            self._log(f"💾 数据文件位置: {self.data_manager.data_file}")
+            
             # 异步加载状态，避免启动时阻塞UI
             loop = asyncio.get_event_loop()
             file_items, output_dir = await loop.run_in_executor(

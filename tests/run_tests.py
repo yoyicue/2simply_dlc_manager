@@ -46,7 +46,8 @@ def main():
         tests_dir / "test_core.py",
         tests_dir / "test_fix.py",
         tests_dir / "test_download.py",
-        tests_dir / "test_asyncio.py"
+        tests_dir / "test_asyncio.py",
+        tests_dir / "test_user_data.py"
     ]
     
     # 过滤存在的测试文件
