@@ -1,0 +1,9 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource>
+        <file>style.qss</file>
+        <file>icons/app_icon.png</file>
+        <file>icons/app_icon.ico</file>
+        <file>icons/app_icon.icns</file>
+    </qresource>
+</RCC> 
