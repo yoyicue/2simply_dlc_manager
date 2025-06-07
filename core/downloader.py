@@ -10,6 +10,7 @@ import os  # 局部导入, 避免顶层不必要依赖
 
 from .models import FileItem, DownloadStatus, DownloadConfig
 from .network import NetworkManager, AsyncHttpClient, NetworkConfig
+from .resume import SmartResume
 
 # 向后兼容的导入
 try:
@@ -43,6 +44,13 @@ class Downloader(QObject):
         self._network_config: Optional[NetworkConfig] = None
         self._http2_enabled = False
         
+        # 第二阶段：智能断点续传
+        if self.config.enable_resume:
+            self.smart_resume = SmartResume()
+            self.log_message.emit("⚡ 智能断点续传已启用")
+        else:
+            self.smart_resume = None
+            
         # 向后兼容的会话
         self._session: Optional[Any] = None
         
@@ -503,7 +511,38 @@ class Downloader(QObject):
             return False
     
     async def _download_with_progress(self, file_item: FileItem, url: str, local_path: Path) -> bool:
-        """带进度的下载 - HTTP/2 优化版本"""
+        """带进度的下载 - HTTP/2 + 智能断点续传版本"""
+        try:
+            # 第二阶段：智能断点续传优先
+            if (self.smart_resume and 
+                self.config.enable_resume and
+                file_item.size and 
+                file_item.size >= self.config.min_resume_size):
+                
+                self.log_message.emit(f"🔄 尝试断点续传: {file_item.filename}")
+                resume_success = await self.smart_resume.smart_download(
+                    self._http_client, file_item, url, local_path
+                )
+                
+                if resume_success:
+                    self.log_message.emit(f"✅ 断点续传成功: {file_item.filename}")
+                    file_item.mark_completed(local_path)
+                    file_item.update_disk_metadata(local_path)
+                    self._update_bloom_filter_on_completion(file_item)
+                    self.file_completed.emit(file_item.filename, True, "断点续传完成")
+                    return True
+                else:
+                    self.log_message.emit(f"⚠️  断点续传失败，回退到完整下载: {file_item.filename}")
+            
+            # 降级到原有完整下载逻辑
+            return await self._original_download_with_progress(file_item, url, local_path)
+            
+        except Exception as e:
+            self.log_message.emit(f"下载失败: {file_item.filename} - {str(e)}")
+            raise Exception(f"下载失败: {str(e)}")
+    
+    async def _original_download_with_progress(self, file_item: FileItem, url: str, local_path: Path) -> bool:
+        """原有的完整文件下载逻辑 - 作为断点续传的降级方案"""
         try:
             # 使用自适应块大小
             adaptive_chunk_size = self.config.get_adaptive_chunk_size(file_item)
@@ -575,8 +614,9 @@ class Downloader(QObject):
                 if file_item.size:
                     file_type = "大文件" if file_item.size > self.config.large_file_threshold else "小文件" if file_item.size < self.config.small_file_threshold else "中等文件"
                     compression_info = "压缩传输" if 'gzip' in headers.get('Accept-Encoding', '') else "原始传输"
+                    resume_info = "断点续传" if self.config.enable_resume else "完整下载"
                     self.log_message.emit(f"✅ {protocol_info} {file_type} {file_item.filename} 下载完成 "
-                                        f"({file_item.size/1024:.1f}KB, {compression_info}, 块大小:{adaptive_chunk_size/1024:.1f}KB)")
+                                        f"({file_item.size/1024:.1f}KB, {compression_info}, {resume_info}, 块大小:{adaptive_chunk_size/1024:.1f}KB)")
                 
                 self.file_completed.emit(file_item.filename, True, "下载成功")
                 return True

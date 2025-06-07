@@ -153,6 +153,17 @@ class DownloadConfig:
     auto_detect_http2: bool = True  # 自动检测HTTP/2支持
     fallback_to_http1: bool = True  # HTTP/2失败时降级到HTTP/1.1
     
+    # 断点续传配置 - 第二阶段新增
+    enable_resume: bool = True  # 启用断点续传
+    min_resume_size: int = 2 * 1024 * 1024  # 2MB最小续传文件大小
+    resume_timeout: int = 60  # 续传检测超时
+    verify_integrity: bool = True  # 启用完整性校验
+    
+    # 网络恢复配置 - 高ROI自动化功能
+    max_recovery_attempts: int = 5  # 最大网络恢复尝试次数
+    recovery_base_delay: float = 1.0  # 基础重试延迟
+    network_error_threshold: int = 3  # 网络错误阈值
+    
     def __post_init__(self):
         """验证配置参数"""
         if self.concurrent_requests <= 0:
