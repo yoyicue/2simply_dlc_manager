@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QTableView, QPlainTextEdit, QSplitter, QPushButton,
     QLabel, QProgressBar, QFileDialog, QMessageBox,
     QToolBar, QStatusBar, QGroupBox, QComboBox,
-    QLineEdit, QCheckBox, QSpinBox
+    QLineEdit, QCheckBox, QSpinBox, QMenuBar
 )
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon
@@ -60,11 +60,14 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._connect_signals()
         
-        # 异步加载保存的状态
-        asyncio.create_task(self._load_saved_state())
+        # 延迟加载保存的状态，等事件循环启动后执行
+        QTimer.singleShot(100, self._schedule_load_saved_state)
     
     def _setup_ui(self):
         """设置用户界面"""
+        # 创建菜单栏
+        self._create_menubar()
+        
         # 中央组件
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -267,6 +270,20 @@ class MainWindow(QMainWindow):
         separator.setFixedWidth(1)
         separator.setStyleSheet("background-color: #cccccc;")
         return separator
+    
+    def _schedule_load_saved_state(self):
+        """调度异步加载保存的状态"""
+        try:
+            # 检查事件循环是否已经运行
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(self._load_saved_state())
+            else:
+                # 如果事件循环还没运行，再延迟一点
+                QTimer.singleShot(200, self._schedule_load_saved_state)
+        except RuntimeError:
+            # 如果没有事件循环，跳过异步加载
+            print("警告：无法加载保存的状态 - 没有事件循环")
     
     def _connect_signals(self):
         """连接信号和槽"""
@@ -585,4 +602,31 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.status_label.setText("下载已取消")
         self.downloader = None
-        self._update_ui_state() 
+        self._update_ui_state()
+    
+    def _create_menubar(self):
+        """创建菜单栏"""
+        menubar = self.menuBar()
+        
+        # 帮助菜单
+        help_menu = menubar.addMenu("帮助")
+        
+        # 关于动作
+        about_action = QAction("关于 DLC Manager", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+        
+        # 分隔符
+        help_menu.addSeparator()
+        
+        # 退出动作
+        exit_action = QAction("退出", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        help_menu.addAction(exit_action)
+    
+    def _show_about(self):
+        """显示关于对话框"""
+        from .about_dialog import AboutDialog
+        dialog = AboutDialog(self)
+        dialog.exec() 
