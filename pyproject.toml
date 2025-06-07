@@ -14,7 +14,7 @@ authors = [
 maintainers = [
     {name = "DLC Manager Team"},
 ]
-keywords = ["dlc", "manager", "download", "qt", "gui", "async"]
+keywords = ["dlc", "manager", "download", "qt", "gui", "async", "aiohttp", "qasync"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
@@ -27,16 +27,17 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
-    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: File Transfer Protocol (FTP)",
+    "Topic :: System :: Archiving :: Packaging",
     "Environment :: X11 Applications :: Qt",
-    "Topic :: Multimedia :: Graphics",
+    "Environment :: MacOS X",
+    "Environment :: Win32 (MS Windows)",
 ]
 requires-python = ">=3.8"
 dependencies = [
     "PySide6>=6.7.0",
     "aiohttp>=3.9.5",
     "qasync>=0.27.1",
-    "rich>=13.7.1",
     "aiofiles>=23.2.1",
     "Pillow>=9.0.0",
 ]
@@ -110,7 +111,7 @@ profile = "black"
 multi_line_output = 3
 line_length = 88
 known_first_party = ["core", "ui", "utils", "dlc"]
-known_third_party = ["PySide6", "aiohttp", "qasync", "rich", "aiofiles", "PIL"]
+known_third_party = ["PySide6", "aiohttp", "qasync", "aiofiles", "PIL"]
 
 [tool.flake8]
 max-line-length = 88
@@ -148,7 +149,6 @@ exclude = [
 [[tool.mypy.overrides]]
 module = [
     "qasync",
-    "rich.*",
 ]
 ignore_missing_imports = true
 
