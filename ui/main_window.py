@@ -547,8 +547,10 @@ class MainWindow(QMainWindow):
     @qasync.asyncSlot(str, bool, str)
     async def _on_file_completed(self, filename: str, success: bool, message: str):
         """文件下载完成"""
-        status = "成功" if success else "失败"
-        self._log(f"文件下载完成: {filename} - {status} ({message})")
+        # 阶段一优化：减少重复的"文件已存在"日志输出
+        if not (success and message == "文件已存在"):
+            status = "成功" if success else "失败"
+            self._log(f"文件下载完成: {filename} - {status} ({message})")
         
         # 更新表格显示
         for item in self.file_table_model.get_file_items():

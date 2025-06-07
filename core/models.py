@@ -30,6 +30,12 @@ class FileItem:
     error_message: Optional[str] = None  # 错误信息
     download_url: Optional[str] = None  # 下载URL
     
+    # 阶段一新增：元数据缓存字段
+    mtime: Optional[float] = None  # 文件修改时间戳
+    disk_verified: bool = False  # 磁盘验证标记
+    last_checked: Optional[str] = None  # 最后检查时间 ISO格式
+    cache_version: str = "1.0"  # 缓存版本号
+    
     @property
     def file_extension(self) -> str:
         """获取文件扩展名"""
@@ -85,6 +91,43 @@ class FileItem:
         """标记为跳过"""
         self.status = DownloadStatus.SKIPPED
         self.error_message = reason
+    
+    def update_disk_metadata(self, file_path: Path):
+        """更新文件的磁盘元数据"""
+        if file_path.exists():
+            try:
+                stat_info = file_path.stat()
+                self.mtime = stat_info.st_mtime
+                self.size = stat_info.st_size
+                self.disk_verified = True
+                from datetime import datetime
+                self.last_checked = datetime.now().isoformat()
+            except (OSError, IOError):
+                self.disk_verified = False
+    
+    def is_cache_valid(self, file_path: Path, max_age_hours: int = 24) -> bool:
+        """检查缓存是否仍然有效"""
+        if not self.disk_verified or not self.last_checked:
+            return False
+        
+        try:
+            from datetime import datetime, timedelta
+            last_check = datetime.fromisoformat(self.last_checked)
+            
+            # 检查缓存时间是否过期
+            if datetime.now() - last_check > timedelta(hours=max_age_hours):
+                return False
+            
+            # 快速检查文件是否存在且大小匹配
+            if not file_path.exists():
+                return False
+            
+            stat_info = file_path.stat()
+            # 比较mtime和size，如果变化则缓存失效
+            return (self.mtime == stat_info.st_mtime and 
+                   self.size == stat_info.st_size)
+        except:
+            return False
 
 
 @dataclass

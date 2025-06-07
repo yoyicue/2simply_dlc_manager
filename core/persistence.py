@@ -3,7 +3,7 @@
 """
 import json
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from .models import FileItem, DownloadStatus
 
 
@@ -114,8 +114,15 @@ class DataManager:
     def save_state(self, file_items: List[FileItem], output_dir: Path):
         """保存下载状态"""
         try:
+            from datetime import datetime
+            
             state_data = {
                 'output_dir': str(output_dir),
+                # 阶段一新增：缓存元数据
+                'metadata_version': '1.0',
+                'last_full_scan': datetime.now().isoformat(),
+                'directory_structure': 'flat',  # 当前为平铺结构
+                'total_files': len(file_items),
                 'files': []
             }
             
@@ -129,7 +136,12 @@ class DataManager:
                     'downloaded_size': item.downloaded_size,
                     'local_path': str(item.local_path) if item.local_path else None,
                     'error_message': item.error_message,
-                    'download_url': item.download_url
+                    'download_url': item.download_url,
+                    # 阶段一新增：元数据字段
+                    'mtime': item.mtime,
+                    'disk_verified': item.disk_verified,
+                    'last_checked': item.last_checked,
+                    'cache_version': item.cache_version
                 }
                 state_data['files'].append(file_data)
             
@@ -169,7 +181,12 @@ class DataManager:
                     downloaded_size=file_data.get('downloaded_size', 0),
                     local_path=Path(file_data['local_path']) if file_data.get('local_path') else None,
                     error_message=file_data.get('error_message'),
-                    download_url=file_data.get('download_url')
+                    download_url=file_data.get('download_url'),
+                    # 阶段一新增：加载元数据字段（向后兼容）
+                    mtime=file_data.get('mtime'),
+                    disk_verified=file_data.get('disk_verified', False),
+                    last_checked=file_data.get('last_checked'),
+                    cache_version=file_data.get('cache_version', '1.0')
                 )
                 file_items.append(item)
             
@@ -256,4 +273,118 @@ class DataManager:
                 if search_text in item.filename.lower() or search_text in item.md5.lower()
             ]
         
-        return filtered_items 
+        return filtered_items
+    
+    def get_cache_metadata(self) -> Dict[str, Any]:
+        """获取缓存元数据信息"""
+        if not self.data_file.exists():
+            return {}
+        
+        try:
+            state_data = json.loads(self.data_file.read_text(encoding='utf-8'))
+            return {
+                'metadata_version': state_data.get('metadata_version', '0.0'),
+                'last_full_scan': state_data.get('last_full_scan'),
+                'directory_structure': state_data.get('directory_structure', 'flat'),
+                'total_files': state_data.get('total_files', 0),
+                'file_count': len(state_data.get('files', []))
+            }
+        except:
+            return {}
+    
+    def analyze_cache_reliability(self, file_items: List[FileItem], output_dir: Path, 
+                                sample_ratio: float = 0.05) -> Dict[str, Any]:
+        """分析缓存可靠性
+        
+        Args:
+            file_items: 文件列表
+            output_dir: 输出目录
+            sample_ratio: 抽样比例 (默认5%)
+        
+        Returns:
+            分析结果字典包含可靠性评分和建议
+        """
+        import random
+        from datetime import datetime, timedelta
+        
+        if not file_items:
+            return {
+                'reliable': False, 
+                'reason': '无缓存数据', 
+                'score': 0.0,
+                'recommendation': 'full_scan'
+            }
+        
+        # 筛选已完成的文件用于抽样
+        completed_items = [item for item in file_items 
+                         if item.status == DownloadStatus.COMPLETED and item.disk_verified]
+        
+        if not completed_items:
+            return {
+                'reliable': False, 
+                'reason': '无已验证的完成文件', 
+                'score': 0.0,
+                'recommendation': 'full_scan'
+            }
+        
+        # 计算抽样大小
+        sample_size = max(10, int(len(completed_items) * sample_ratio))
+        sample_size = min(sample_size, len(completed_items))
+        
+        sample_items = random.sample(completed_items, sample_size)
+        
+        # 执行抽样验证
+        valid_count = 0
+        invalid_count = 0
+        outdated_count = 0
+        
+        for item in sample_items:
+            if not item.last_checked:
+                invalid_count += 1
+                continue
+                
+            file_path = output_dir / item.full_filename
+            
+            try:
+                # 检查文件是否存在
+                if not file_path.exists():
+                    invalid_count += 1
+                    continue
+                
+                # 检查缓存是否过期（24小时）
+                if not item.is_cache_valid(file_path, max_age_hours=24):
+                    outdated_count += 1
+                    continue
+                
+                valid_count += 1
+                
+            except Exception:
+                invalid_count += 1
+        
+        # 计算可靠性评分
+        total_checked = len(sample_items)
+        reliability_score = valid_count / total_checked if total_checked > 0 else 0.0
+        
+        # 分析结果
+        analysis = {
+            'reliable': reliability_score >= 0.9,  # 90%以上认为可靠
+            'score': reliability_score,
+            'sample_size': sample_size,
+            'valid_count': valid_count,
+            'invalid_count': invalid_count,
+            'outdated_count': outdated_count,
+            'total_completed': len(completed_items)
+        }
+        
+        # 添加建议
+        if reliability_score >= 0.95:
+            analysis['recommendation'] = 'cache_reliable'
+            analysis['reason'] = f'缓存高度可靠 ({reliability_score:.1%})'
+        elif reliability_score >= 0.8:
+            analysis['recommendation'] = 'incremental_check'
+            analysis['reason'] = f'缓存基本可靠 ({reliability_score:.1%})，建议增量检查'
+        else:
+            analysis['recommendation'] = 'full_scan'
+            analysis['reason'] = f'缓存可靠性低 ({reliability_score:.1%})，建议完整扫描'
+        
+        return analysis 

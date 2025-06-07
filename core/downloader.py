@@ -34,60 +34,176 @@ class Downloader(QObject):
         self._semaphore: Optional[asyncio.Semaphore] = None
         
     async def _batch_check_existing_files(self, file_items: List[FileItem], output_dir: Path) -> tuple[List[FileItem], List[FileItem]]:
-        """异步批量检查文件是否已存在
+        """智能批量检查文件是否已存在 - 阶段一优化版本
+        
+        使用缓存验证 + 智能增量检查，大幅提升性能
         
         返回:
             (existing_files, files_to_download)
-        
-        该实现通过一次性扫描输出目录, 构建 {文件名: 文件大小} 映射, 避免对每个条目都执行磁盘 IO, 大幅提升性能。
         """
         loop = asyncio.get_event_loop()
-
+        
+        # 从DataManager导入用于缓存分析
+        from .persistence import DataManager
+        
         # -----------------------------
-        # 1. 扫描目录(在线程池中执行, 防止阻塞事件循环)
+        # 1. 分析缓存可靠性
         # -----------------------------
-        def _scan_dir(directory: Path) -> dict[str, int]:
-            mapping: dict[str, int] = {}
-            try:
-                with os.scandir(directory) as it:
-                    for entry in it:
-                        if entry.is_file():
-                            try:
-                                size = entry.stat().st_size
-                                mapping[entry.name] = size
-                            except (OSError, IOError):
-                                # stat 失败时忽略该文件
-                                pass
-            except FileNotFoundError:
-                # 目标目录不存在, 视作空目录
-                pass
-            return mapping
-
-        files_meta: dict[str, int] = await loop.run_in_executor(None, _scan_dir, output_dir)
-
+        self.log_message.emit("🔍 分析缓存可靠性...")
+        
+        data_manager = DataManager()
+        cache_analysis = data_manager.analyze_cache_reliability(file_items, output_dir)
+        
+        self.log_message.emit(f"📊 缓存分析: {cache_analysis['reason']}")
+        
         # -----------------------------
-        # 2. 根据扫描结果分类文件
+        # 2. 根据缓存可靠性选择策略
         # -----------------------------
-        existing_files: list[FileItem] = []
-        files_to_download: list[FileItem] = []
+        if cache_analysis['recommendation'] == 'cache_reliable':
+            return await self._cache_based_check(file_items, output_dir)
+        elif cache_analysis['recommendation'] == 'incremental_check':
+            return await self._smart_incremental_check(file_items, output_dir, cache_analysis)
+        else:
+            return await self._optimized_full_scan(file_items, output_dir)
+    
+    async def _cache_based_check(self, file_items: List[FileItem], output_dir: Path) -> tuple[List[FileItem], List[FileItem]]:
+        """基于缓存的快速检查"""
+        self.log_message.emit("⚡ 执行基于缓存的快速检查...")
+        
+        existing_files = []
+        files_to_download = []
         total_files = len(file_items)
-
+        
         for idx, item in enumerate(file_items):
             if self._is_cancelled:
                 break
-
-            size_on_disk = files_meta.get(item.full_filename)
-            if size_on_disk is not None and (item.size is None or size_on_disk == item.size):
+            
+            file_path = output_dir / item.full_filename
+            
+            # 如果缓存标记为已验证且未过期，直接信任缓存
+            if (item.status == DownloadStatus.COMPLETED and 
+                item.disk_verified and 
+                item.is_cache_valid(file_path)):
                 existing_files.append(item)
             else:
                 files_to_download.append(item)
-
-            # 仅在一定间隔更新进度, 减少信号数量
-            if idx % 200 == 0 or idx == total_files - 1:
+            
+            # 定期更新进度
+            if idx % 500 == 0 or idx == total_files - 1:
                 progress_percent = (idx / total_files) * 100
                 self.check_progress.emit(progress_percent)
-                await asyncio.sleep(0)  # 让出控制权, 保证 UI 流畅
-
+                await asyncio.sleep(0)
+        
+        self.log_message.emit(f"✅ 缓存检查完成: {len(existing_files)} 个文件可信任缓存")
+        return existing_files, files_to_download
+    
+    async def _smart_incremental_check(self, file_items: List[FileItem], output_dir: Path, 
+                                     cache_analysis: dict) -> tuple[List[FileItem], List[FileItem]]:
+        """智能增量检查 - 结合缓存与选择性验证"""
+        self.log_message.emit("🧠 执行智能增量检查...")
+        
+        existing_files = []
+        files_to_download = []
+        items_need_verification = []
+        
+        # 第一阶段：基于缓存快速分类
+        for item in file_items:
+            if self._is_cancelled:
+                break
+            
+            file_path = output_dir / item.full_filename
+            
+            if (item.status == DownloadStatus.COMPLETED and 
+                item.disk_verified and 
+                item.is_cache_valid(file_path)):
+                # 缓存可信，直接归类为存在
+                existing_files.append(item)
+            elif item.status == DownloadStatus.COMPLETED:
+                # 需要验证的已完成文件
+                items_need_verification.append(item)
+            else:
+                # 明确需要下载的文件
+                files_to_download.append(item)
+        
+        # 第二阶段：并行验证需要检查的文件
+        if items_need_verification:
+            self.log_message.emit(f"📋 验证 {len(items_need_verification)} 个可疑文件...")
+            
+            verified_existing, verified_missing = await self._parallel_verify_files(
+                items_need_verification, output_dir
+            )
+            
+            existing_files.extend(verified_existing)
+            files_to_download.extend(verified_missing)
+        
+        self.log_message.emit(f"✅ 增量检查完成: 信任 {len(existing_files)} 个，需验证 {len(items_need_verification)} 个")
+        return existing_files, files_to_download
+    
+    async def _parallel_verify_files(self, file_items: List[FileItem], output_dir: Path) -> tuple[List[FileItem], List[FileItem]]:
+        """并行验证文件存在性和元数据"""
+        from concurrent.futures import ThreadPoolExecutor
+        import os
+        
+        def verify_single_file(item: FileItem) -> tuple[FileItem, bool]:
+            """验证单个文件"""
+            file_path = output_dir / item.full_filename
+            try:
+                if not file_path.exists():
+                    return item, False
+                
+                stat_info = file_path.stat()
+                
+                # 更新元数据
+                item.update_disk_metadata(file_path)
+                item.mark_completed(file_path)
+                
+                return item, True
+            except (OSError, IOError):
+                return item, False
+        
+        loop = asyncio.get_event_loop()
+        max_workers = min(8, len(file_items))  # 限制并发数
+        
+        existing_files = []
+        files_to_download = []
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 分批处理以控制内存使用
+            batch_size = 50
+            total_batches = (len(file_items) + batch_size - 1) // batch_size
+            
+            for batch_idx in range(total_batches):
+                if self._is_cancelled:
+                    break
+                
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, len(file_items))
+                batch_items = file_items[start_idx:end_idx]
+                
+                # 并行执行当前批次
+                tasks = [
+                    loop.run_in_executor(executor, verify_single_file, item)
+                    for item in batch_items
+                ]
+                
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # 处理结果
+                for result in batch_results:
+                    if isinstance(result, Exception):
+                        continue
+                    
+                    item, exists = result
+                    if exists:
+                        existing_files.append(item)
+                    else:
+                        files_to_download.append(item)
+                
+                # 更新进度
+                progress = ((batch_idx + 1) / total_batches) * 100
+                self.check_progress.emit(progress)
+                await asyncio.sleep(0)
+        
         return existing_files, files_to_download
     
     async def download_files(self, file_items: List[FileItem], output_dir: Path) -> Dict[str, bool]:
@@ -112,25 +228,69 @@ class Downloader(QObject):
         # 发送检查完成信号
         self.check_progress.emit(100.0)
         
-        # 处理已存在的文件
+        # 处理已存在的文件 - 阶段一优化：批量处理，减少日志输出
         completed_count = 0
         total_count = len(file_items)
         
-        for item in existing_files:
-            if self._is_cancelled:
-                break
-            item.mark_completed(output_dir / item.full_filename)
-            results[item.filename] = True
-            completed_count += 1
+        if existing_files:
+            self.log_message.emit(f"📁 批量处理 {len(existing_files)} 个已存在的文件...")
             
-            # 更新进度
-            overall_progress = (completed_count / total_count) * 100
-            self.progress_updated.emit(item.filename, 100.0)
-            self.file_completed.emit(item.filename, True, "文件已存在，跳过下载")
-            self.overall_progress.emit(overall_progress, completed_count, total_count)
+            # 重置进度日志标记
+            for attr in ['_logged_25', '_logged_50', '_logged_75']:
+                if hasattr(self, attr):
+                    delattr(self, attr)
             
-            # 让出控制权，避免长时间占用
-            await asyncio.sleep(0)
+            # 动态计算批次大小：根据文件数量智能调整
+            if len(existing_files) <= 500:
+                batch_size = 100  # 小量文件：100个一批
+            elif len(existing_files) <= 5000:
+                batch_size = 1000  # 中量文件：1000个一批  
+            elif len(existing_files) <= 20000:
+                batch_size = 5000  # 大量文件：5000个一批
+            else:
+                batch_size = 10000  # 超大量文件：10000个一批
+            for batch_start in range(0, len(existing_files), batch_size):
+                if self._is_cancelled:
+                    break
+                
+                batch_end = min(batch_start + batch_size, len(existing_files))
+                batch = existing_files[batch_start:batch_end]
+                
+                for item in batch:
+                    item.mark_completed(output_dir / item.full_filename)
+                    # 阶段一新增：更新磁盘元数据
+                    item.update_disk_metadata(output_dir / item.full_filename)
+                    results[item.filename] = True
+                    completed_count += 1
+                
+                # 批量更新进度和UI
+                overall_progress = (completed_count / total_count) * 100
+                self.overall_progress.emit(overall_progress, completed_count, total_count)
+                
+                # 智能进度报告：只在重要节点输出日志
+                progress_ratio = batch_end / len(existing_files)
+                should_log = (
+                    batch_end < len(existing_files) and (
+                        progress_ratio >= 0.25 and not hasattr(self, '_logged_25') or
+                        progress_ratio >= 0.50 and not hasattr(self, '_logged_50') or  
+                        progress_ratio >= 0.75 and not hasattr(self, '_logged_75')
+                    )
+                )
+                
+                if should_log:
+                    self.log_message.emit(f"✅ 已处理 {batch_end}/{len(existing_files)} 个现有文件 ({progress_ratio:.0%})")
+                    if progress_ratio >= 0.25: self._logged_25 = True
+                    if progress_ratio >= 0.50: self._logged_50 = True  
+                    if progress_ratio >= 0.75: self._logged_75 = True
+                
+                # 让出控制权，保持UI响应 - 大批次时减少睡眠频率
+                if batch_size >= 5000:
+                    await asyncio.sleep(0.001)  # 大批次快速处理
+                else:
+                    await asyncio.sleep(0.002)  # 小批次稍微多让出一点时间
+            
+            # 汇总信息，替代逐个文件的日志
+            self.log_message.emit(f"✅ 批量跳过 {len(existing_files)} 个已存在文件，节省下载时间")
         
         skipped_count = len(existing_files)
         
@@ -264,8 +424,11 @@ class Downloader(QObject):
             # 二次检查文件是否已存在（防止并发时出现的竞态条件）
             if local_path.exists():
                 file_item.mark_completed(local_path)
+                # 阶段一新增：更新磁盘元数据
+                file_item.update_disk_metadata(local_path)
                 self.progress_updated.emit(file_item.filename, 100.0)
-                self.file_completed.emit(file_item.filename, True, "文件已存在，跳过下载")
+                # 阶段一优化：减少重复的"已存在"日志，仅在UI层面通知
+                self.file_completed.emit(file_item.filename, True, "文件已存在")
                 return True
             
             # 重试机制
@@ -330,6 +493,8 @@ class Downloader(QObject):
                 
                 # 标记完成
                 file_item.mark_completed(local_path)
+                # 阶段一新增：更新磁盘元数据
+                file_item.update_disk_metadata(local_path)
                 self.file_completed.emit(file_item.filename, True, "下载成功")
                 return True
                 
@@ -346,3 +511,58 @@ class Downloader(QObject):
     def is_downloading(self) -> bool:
         """是否正在下载"""
         return self._is_downloading 
+
+    async def _optimized_full_scan(self, file_items: List[FileItem], output_dir: Path) -> tuple[List[FileItem], List[FileItem]]:
+        """优化版完整扫描 - 当缓存不可靠时的降级选项"""
+        self.log_message.emit("🔄 执行优化版完整扫描...")
+        
+        loop = asyncio.get_event_loop()
+        
+        # 执行目录扫描构建文件映射
+        def _scan_dir(directory: Path) -> dict[str, int]:
+            mapping: dict[str, int] = {}
+            try:
+                with os.scandir(directory) as it:
+                    for entry in it:
+                        if entry.is_file():
+                            try:
+                                size = entry.stat().st_size
+                                mapping[entry.name] = size
+                            except (OSError, IOError):
+                                # stat 失败时忽略该文件
+                                pass
+            except FileNotFoundError:
+                # 目标目录不存在, 视作空目录
+                pass
+            return mapping
+
+        self.log_message.emit("📂 扫描目录构建文件映射...")
+        files_meta: dict[str, int] = await loop.run_in_executor(None, _scan_dir, output_dir)
+        
+        # 根据扫描结果分类文件并更新元数据
+        existing_files = []
+        files_to_download = []
+        total_files = len(file_items)
+
+        for idx, item in enumerate(file_items):
+            if self._is_cancelled:
+                break
+
+            size_on_disk = files_meta.get(item.full_filename)
+            if size_on_disk is not None and (item.size is None or size_on_disk == item.size):
+                # 文件存在，更新元数据
+                file_path = output_dir / item.full_filename
+                item.update_disk_metadata(file_path)
+                item.mark_completed(file_path)
+                existing_files.append(item)
+            else:
+                files_to_download.append(item)
+
+            # 定期更新进度
+            if idx % 200 == 0 or idx == total_files - 1:
+                progress_percent = (idx / total_files) * 100
+                self.check_progress.emit(progress_percent)
+                await asyncio.sleep(0)
+
+        self.log_message.emit(f"✅ 完整扫描完成: 发现 {len(existing_files)} 个现有文件")
+        return existing_files, files_to_download 
