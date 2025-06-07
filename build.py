@@ -137,10 +137,14 @@ def create_installer():
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for file_path in dist_dir.rglob("*"):
             if file_path.name != zip_name and file_path.is_file():
-                # macOS: 只打包 .app 文件，跳过独立的可执行文件以避免重复
+                # macOS: 根据用途决定是否包含独立可执行文件
                 if sys.platform == "darwin" and file_path.name == "DLC Manager" and file_path.parent == dist_dir:
-                    print(f"⏭️  跳过重复的独立可执行文件: {file_path.name}")
-                    continue
+                    # 可以通过环境变量控制是否包含独立可执行文件
+                    include_standalone = os.getenv('INCLUDE_STANDALONE', 'false').lower() == 'true'
+                    if not include_standalone:
+                        print(f"⏭️  跳过独立可执行文件 (GUI分发): {file_path.name}")
+                        print("💡 如需包含独立可执行文件，请设置环境变量: INCLUDE_STANDALONE=true")
+                        continue
                     
                 arcname = file_path.relative_to(dist_dir)
                 zipf.write(file_path, arcname)
@@ -188,7 +192,12 @@ def main():
     print("\n📋 使用说明:")
     print("1. 运行应用测试功能")
     print("2. 分发 dist/ 目录中的文件")
-    print("3. 用户可以直接运行可执行文件")
+    if sys.platform == "darwin":
+        print("3. 普通用户双击 .app 文件运行")
+        print("4. 高级用户可使用独立可执行文件：./dist/DLC\\ Manager")
+        print("💡 包含独立可执行文件构建：INCLUDE_STANDALONE=true python build.py")
+    else:
+        print("3. 用户可以直接运行可执行文件")
 
 if __name__ == "__main__":
     main() 
