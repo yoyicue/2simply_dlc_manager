@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QTableView, QPlainTextEdit, QSplitter, QPushButton,
     QLabel, QProgressBar, QFileDialog, QMessageBox,
     QToolBar, QStatusBar, QGroupBox, QComboBox,
-    QLineEdit, QCheckBox, QSpinBox, QMenuBar
+    QLineEdit, QCheckBox, QSpinBox, QMenuBar, QApplication
 )
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon
@@ -33,6 +33,11 @@ class MainWindow(QMainWindow):
         self.data_manager = DataManager()
         self.downloader: Optional[Downloader] = None
         self.current_output_dir: Optional[Path] = None
+        
+        # 性能优化：大数据集处理
+        self._download_completed_count = 0  # 下载完成计数器
+        self._last_stats_update = 0  # 上次统计更新时间
+        self._last_save_time = 0  # 上次保存时间
         
         # UI组件
         self.file_table_model = FileTableModel()
@@ -358,17 +363,41 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "警告", "请至少选择一个文件进行验证")
                 return
 
+            # 批量检查文件存在性 - 高效版本
+            self._log(f"🔍 开始批量检查文件存在性...")
+            
+            # 构建文件路径列表
+            file_paths = [self.current_output_dir / item.full_filename for item in checked_items]
+            
+            # 批量检查存在性（减少I/O调用）
+            existing_files = set()
+            import os
+            try:
+                # 使用os.listdir批量获取目录内容，比逐个exists()更高效
+                if self.current_output_dir.exists():
+                    for root, dirs, files in os.walk(self.current_output_dir):
+                        root_path = Path(root)
+                        for file in files:
+                            existing_files.add(root_path / file)
+            except Exception as e:
+                self._log(f"⚠️ 批量检查失败，降级为逐个检查: {e}")
+                # 降级方案：逐个检查
+                existing_files = {path for path in file_paths if path.exists()}
+            
             # 过滤出需要验证的文件
             files_to_verify = []
             already_verified_count = 0
+            
             for item in checked_items:
                 file_path = self.current_output_dir / item.full_filename
-                if file_path.exists():
+                if file_path in existing_files:
                     # 跳过已经验证成功的文件
                     if item.md5_verify_status == MD5VerifyStatus.VERIFIED_SUCCESS:
                         already_verified_count += 1
                         continue
                     files_to_verify.append(item)
+            
+            self._log(f"✅ 批量检查完成: {len(existing_files)} 个文件存在")
 
             # 显示跳过的已验证文件信息
             if already_verified_count > 0:
@@ -416,55 +445,88 @@ class MainWindow(QMainWindow):
             self.md5_calculator.overall_progress.connect(self._on_md5_overall_progress)
             self.md5_calculator.log_message.connect(self._log)
             
-            # 开始并行计算
-            results = await self.md5_calculator.calculate_md5_parallel(
-                files_to_verify, 
-                self.current_output_dir
-            )
+            # 🚀 流式处理：不再一次性持有所有结果，改为实时处理
+            # 建立filename到FileItem的快速映射
+            filename_to_item = {item.filename: item for item in files_to_verify}
             
-            # 处理结果并更新状态
             success_count = 0
             failed_count = 0
+            processed_count = 0
             
-            for filename, result in results.items():
-                # 找到对应的文件项
-                file_item = None
-                for item in files_to_verify:
-                    if item.filename == filename:
-                        file_item = item
-                        break
+            # 连接流式处理信号
+            self.md5_calculator.file_completed.disconnect()  # 先断开旧连接
+            
+            # 使用lambda创建流式处理器，避免大结果字典
+            def stream_process_result(filename: str, success: bool, message: str):
+                nonlocal success_count, failed_count, processed_count
                 
+                # O(1)查找对应的文件项
+                file_item = filename_to_item.get(filename)
                 if not file_item:
-                    continue
+                    return
                 
-                if result.success:
-                    # 检查MD5是否匹配
-                    is_match = not result.error  # error为空表示MD5匹配
-                    file_item.mark_md5_verified(result.calculated_md5, is_match)
+                processed_count += 1
+                
+                if success:
+                    # 检查MD5是否匹配 (message为空表示匹配)
+                    is_match = not message
+                    file_item.mark_md5_verified("", is_match)  # 流式处理不保存calculated_md5
                     
                     if is_match:
                         success_count += 1
                     else:
-                        # MD5不匹配，标记为验证失败
                         file_item.status = DownloadStatus.VERIFY_FAILED
-                        file_item.error_message = result.error
+                        file_item.error_message = message
                         failed_count += 1
                 else:
                     # 计算失败
                     file_item.mark_md5_verified("", False)
                     file_item.status = DownloadStatus.VERIFY_FAILED
-                    file_item.error_message = result.error
+                    file_item.error_message = message
                     failed_count += 1
                 
-                # 更新表格显示
-                self.file_table_model.update_file_by_filename(file_item.filename)
+                # 🚀 实时UI更新，避免批量积累
+                self.file_table_model.update_file_by_filename(filename)
+                
+                # 定期垃圾回收
+                if processed_count % 100 == 0:
+                    import gc
+                    gc.collect()
+                
+                # 减少进度显示频率
+                if processed_count % 1000 == 0:
+                    progress = (processed_count / len(files_to_verify)) * 100
+                    self.status_label.setText(f"实时处理中... {processed_count}/{len(files_to_verify)} ({progress:.1f}%)")
+                    self._log(f"📊 实时处理: {processed_count}/{len(files_to_verify)} ({progress:.1f}%)")
+                    QApplication.processEvents()
             
-            # 强制刷新表格视图
-            if hasattr(self, 'file_table_view') and self.file_table_view:
-                self.file_table_view.viewport().update()
-                self.file_table_view.repaint()
+            # 连接流式处理信号
+            self.md5_calculator.file_completed.connect(stream_process_result)
+            
+            # 🚀 内存监控：检查可用内存
+            try:
+                import psutil
+                memory = psutil.virtual_memory()
+                available_gb = memory.available / (1024**3)
+                self._log(f"💾 开始流式处理，可用内存: {available_gb:.1f}GB")
+            except ImportError:
+                self._log(f"💾 内存监控不可用，开始流式处理")
+            except Exception as e:
+                self._log(f"💾 内存检查失败: {e}")
+            
+            self._log(f"🚀 开始流式MD5验证 - 不再累积大结果集，实时处理{len(files_to_verify)}个文件")
+            
+            # 开始并行计算 - 返回空字典，实际处理通过信号完成
+            _ = await self.md5_calculator.calculate_md5_parallel(
+                files_to_verify, 
+                self.current_output_dir
+            )
+            
+            # 验证完成统计
+            self._log(f"📊 流式处理完成: 总计 {processed_count} 个文件，成功 {success_count}，失败 {failed_count}")
             
             # 保存状态
+            self._log(f"💾 开始保存状态到文件...")
             try:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
@@ -473,26 +535,39 @@ class MainWindow(QMainWindow):
                     self.file_table_model.get_file_items(),
                     self.current_output_dir
                 )
+                self._log(f"💾 状态保存完成")
             except Exception as e:
                 self._log(f"保存状态失败: {e}")
+            
+            # 强制垃圾回收，释放内存
+            import gc
+            gc.collect()
+            self._log(f"📊 内存清理完成，强制垃圾回收")
 
+            # 🚀 验证完成，开始恢复UI状态
+            self._log(f"🎉 MD5验证流程即将完成，恢复UI状态...")
+            
             # 验证完成
             self.progress_bar.setVisible(False)
             
             # 恢复按钮状态
             self.verify_md5_btn.setText("验证MD5")
             self.verify_md5_btn.setToolTip("验证选中文件的MD5完整性")
+            self._log(f"🔄 按钮状态已恢复")
             
             if self._verification_cancelled:
                 self.status_label.setText("MD5验证已取消")
                 self._log(f"并行MD5验证已取消")
             else:
                 self.status_label.setText(f"并行MD5验证完成 - 成功: {success_count}, 失败: {failed_count}")
+                self._log(f"🎉 并行MD5验证已完成 - 成功: {success_count}, 失败: {failed_count}")
                 
                 # 显示验证结果摘要
                 if len(files_to_verify) > 0 or already_verified_count > 0:
                     total_processed = len(files_to_verify) + already_verified_count
                     total_success = success_count + already_verified_count
+                    
+                    self._log(f"📊 准备显示结果摘要弹窗...")
                     QMessageBox.information(
                         self, 
                         "并行验证完成", 
@@ -505,6 +580,7 @@ class MainWindow(QMainWindow):
                         f"总成功率: {total_success}/{total_processed} ({total_success/total_processed*100:.1f}%)\n\n"
                         f"详细结果请查看MD5列的颜色显示"
                     )
+                    self._log(f"📊 结果摘要弹窗已显示")
 
         except Exception as e:
             error_msg = f"并行MD5验证过程中发生错误: {str(e)}"
@@ -518,6 +594,17 @@ class MainWindow(QMainWindow):
             print("=== 错误详情结束 ===")
         
         finally:
+            # 🚀 流式处理：断开所有信号连接
+            if hasattr(self, 'md5_calculator') and self.md5_calculator:
+                try:
+                    # 断开所有信号连接，包括流式处理信号
+                    self.md5_calculator.file_completed.disconnect()
+                    self.md5_calculator.overall_progress.disconnect()  
+                    self.md5_calculator.log_message.disconnect()
+                    self._log(f"🔌 流式处理信号已断开")
+                except Exception as e:
+                    self._log(f"⚠️ 断开信号失败: {e}")
+            
             # 重置验证状态
             self._is_verifying = False
             self._verification_cancelled = False
@@ -525,6 +612,21 @@ class MainWindow(QMainWindow):
             # 清理MD5计算器
             if hasattr(self, 'md5_calculator'):
                 self.md5_calculator = None
+            
+            # 🚀 流式处理内存清理
+            try:
+                # 清理映射引用
+                if 'filename_to_item' in locals():
+                    del filename_to_item
+                if 'files_to_verify' in locals():
+                    del files_to_verify
+                
+                # 强制垃圾回收
+                import gc
+                gc.collect()
+                self._log(f"🧹 流式处理内存清理完成")
+            except Exception as e:
+                self._log(f"⚠️ 内存清理失败: {e}")
             
             # 恢复按钮状态（防止异常情况下按钮状态不正确）
             self.verify_md5_btn.setText("验证MD5")
@@ -788,7 +890,10 @@ class MainWindow(QMainWindow):
     
     @qasync.asyncSlot(str, bool, str)
     async def _on_file_completed(self, filename: str, success: bool, message: str):
-        """文件下载完成"""
+        """文件下载完成 - 大数据集优化版本"""
+        import time
+        current_time = time.time()
+        
         # 阶段一优化：减少重复的"文件已存在"日志输出
         if not (success and message == "文件已存在"):
             status = "成功" if success else "失败"
@@ -797,46 +902,58 @@ class MainWindow(QMainWindow):
         # 更新表格显示（O(1)）
         self.file_table_model.update_file_by_filename(filename)
         
-        self._update_statistics()
+        # 增加完成计数
+        self._download_completed_count += 1
         
-        # 更新全局进度显示
-        all_file_items = self.file_table_model.get_file_items()
-        global_stats = self.data_manager.get_statistics(all_file_items)
-        global_completed = global_stats['completed'] + global_stats['skipped']
-        global_total = global_stats['total']
-        global_progress = (global_completed / global_total * 100) if global_total > 0 else 0
+        # 🚀 大数据集优化：减少频繁的统计更新
+        # 只在特定条件下更新统计信息，避免每个文件都遍历50000+项
+        should_update_stats = (
+            current_time - self._last_stats_update > 2.0 or  # 每2秒更新一次
+            self._download_completed_count % 5 == 0 or  # 每5个文件更新一次
+            not (self.downloader and self.downloader.is_downloading)  # 下载结束时必须更新
+        )
         
-        # 如果正在下载，更新进度条
+        if should_update_stats:
+            self._update_statistics()
+            self._last_stats_update = current_time
+        
+        # 🚀 轻量级进度更新：避免重复计算全局统计
         if self.downloader and self.downloader.is_downloading:
-            self.progress_bar.setValue(int(global_progress))
-            self.status_label.setText(f"下载中... {global_completed}/{global_total} ({global_progress:.1f}%)")
+            # 使用简单的计数器更新进度，避免遍历所有文件
+            selected_count = len(self.file_table_model.get_checked_items()) 
+            progress = (self._download_completed_count / selected_count * 100) if selected_count > 0 else 0
+            self.progress_bar.setValue(int(min(progress, 100)))
+            self.status_label.setText(f"下载中... {self._download_completed_count}/{selected_count} ({progress:.1f}%)")
         
-        # 异步保存状态，避免阻塞UI
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                self.data_manager.save_state,
-                self.file_table_model.get_file_items(),
-                self.current_output_dir
-            )
-        except Exception as e:
-            self._log(f"保存状态失败: {e}")
+        # 🚀 大数据集优化：减少频繁的状态保存  
+        # 50000+文件的JSON序列化非常耗时，改为批量保存
+        should_save_state = (
+            current_time - self._last_save_time > 10.0 or  # 每10秒保存一次
+            self._download_completed_count % 20 == 0 or  # 每20个文件保存一次
+            not (self.downloader and self.downloader.is_downloading)  # 下载结束时必须保存
+        )
+        
+        if should_save_state:
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    self.data_manager.save_state,
+                    self.file_table_model.get_file_items(),
+                    self.current_output_dir
+                )
+                self._last_save_time = current_time
+            except Exception as e:
+                self._log(f"保存状态失败: {e}")
     
     def _on_overall_progress(self, progress: float, completed_count: int, total_count: int):
-        """整体进度更新"""
-        # 获取全局统计信息
-        all_file_items = self.file_table_model.get_file_items()
-        global_stats = self.data_manager.get_statistics(all_file_items)
+        """整体进度更新 - 大数据集优化版本"""
+        # 🚀 大数据集优化：直接使用传入的参数，避免重复计算统计信息
+        # 不再调用 get_statistics() 遍历50000+文件
         
-        # 计算全局进度
-        global_completed = global_stats['completed'] + global_stats['skipped']  # 包含跳过的文件
-        global_total = global_stats['total']
-        global_progress = (global_completed / global_total * 100) if global_total > 0 else 0
-        
-        # 更新进度条和状态显示
-        self.progress_bar.setValue(int(global_progress))
-        self.status_label.setText(f"下载中... {global_completed}/{global_total} ({global_progress:.1f}%)")
+        # 使用传入的下载器进度信息
+        self.progress_bar.setValue(int(progress))
+        self.status_label.setText(f"下载中... {completed_count}/{total_count} ({progress:.1f}%)")
     
     def _on_check_progress(self, progress: float):
         """文件检查进度更新"""
@@ -848,17 +965,52 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.status_label.setText("下载中...")
+        
+        # 🚀 重置性能计数器
+        self._download_completed_count = 0
+        import time
+        self._last_stats_update = time.time()
+        self._last_save_time = time.time()
+        
         self._update_ui_state()
     
     def _on_download_finished(self, success_count: int, failed_count: int):
-        """下载完成"""
+        """下载完成 - 大数据集优化版本"""
         self.progress_bar.setVisible(False)
         self.status_label.setText(
             f"下载完成 - 成功: {success_count}, 失败: {failed_count}"
         )
         self.downloader = None
+        
+        # 🚀 大数据集优化：下载完成时最后一次强制统计更新
+        self._log(f"📊 下载完成，正在更新统计信息...")
         self._update_ui_state()
         self._update_statistics()
+        
+        # 🚀 强制最后一次状态保存，确保数据完整性
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            # 修复：直接使用 run_in_executor 返回的 Future，不要用 create_task 包装
+            future = loop.run_in_executor(
+                None,
+                self.data_manager.save_state,
+                self.file_table_model.get_file_items(),
+                self.current_output_dir
+            )
+            # 可选：添加完成回调
+            future.add_done_callback(lambda f: self._on_final_save_completed(f))
+            self._log(f"💾 状态保存已提交，后台执行中...")
+        except Exception as e:
+            self._log(f"最终状态保存失败: {e}")
+    
+    def _on_final_save_completed(self, future):
+        """最终状态保存完成回调"""
+        try:
+            future.result()  # 获取结果，如果有异常会抛出
+            self._log(f"💾 最终状态保存完成")
+        except Exception as e:
+            self._log(f"最终状态保存失败: {e}")
     
     def _on_download_cancelled(self):
         """下载取消"""
@@ -869,22 +1021,28 @@ class MainWindow(QMainWindow):
     
     # MD5计算器信号处理方法
     def _on_md5_file_completed(self, filename: str, success: bool, message: str):
-        """MD5文件计算完成"""
-        # 更新表格显示
-        self.file_table_model.update_file_by_filename(filename)
+        """MD5文件计算完成 - 优化版本"""
+        # 减少UI更新频率，避免主线程阻塞
+        # 不在这里更新表格，改为批量更新
         
         # 记录日志（只记录失败的情况，成功的太多会刷屏）
         if not success:
             self._log(f"❌ {filename} - {message}")
     
     def _on_md5_overall_progress(self, progress: float, completed_count: int, total_count: int):
-        """MD5整体进度更新"""
-        # 更新进度条和状态显示
-        self.progress_bar.setValue(int(progress))
-        self.status_label.setText(f"并行MD5验证中... {completed_count}/{total_count} ({progress:.1f}%)")
-        
-        # 更新统计信息
-        self._update_statistics()
+        """MD5整体进度更新 - 优化版本"""
+        # 减少UI更新频率，只在关键节点更新
+        if completed_count % 100 == 0 or completed_count == total_count or progress >= 100.0:
+            # 更新进度条和状态显示
+            self.progress_bar.setValue(int(progress))
+            self.status_label.setText(f"并行MD5验证中... {completed_count}/{total_count} ({progress:.1f}%)")
+            
+            # 强制处理UI事件，防止界面卡死
+            QApplication.processEvents()
+            
+            # 只在重要节点更新统计信息
+            if completed_count % 500 == 0 or completed_count == total_count:
+                self._update_statistics()
     
     def _create_menubar(self):
         """创建菜单栏"""
