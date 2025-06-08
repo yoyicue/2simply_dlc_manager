@@ -17,7 +17,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon
 import qasync
 
-from core import FileItem, DownloadStatus, DownloadConfig, Downloader, DataManager
+from core import FileItem, DownloadStatus, DownloadConfig, Downloader, DataManager, MD5VerifyStatus
 from .file_table_model import FileTableModel
 
 
@@ -355,13 +355,25 @@ class MainWindow(QMainWindow):
 
             # 过滤出只有已完成的文件进行验证
             files_to_verify = []
+            already_verified_count = 0
             for item in checked_items:
                 file_path = self.current_output_dir / item.full_filename
                 if file_path.exists():
+                    # 新增：跳过已经验证成功的文件
+                    if item.md5_verify_status == MD5VerifyStatus.VERIFIED_SUCCESS:
+                        already_verified_count += 1
+                        continue
                     files_to_verify.append(item)
 
+            # 显示跳过的已验证文件信息
+            if already_verified_count > 0:
+                self._log(f"⚡ 智能跳过 {already_verified_count} 个已验证成功的文件，无需重复验证")
+
             if not files_to_verify:
-                QMessageBox.information(self, "提示", "选中的文件中没有可验证的本地文件")
+                if already_verified_count > 0:
+                    QMessageBox.information(self, "提示", f"选中的文件中有 {already_verified_count} 个已验证成功，无需重复验证")
+                else:
+                    QMessageBox.information(self, "提示", "选中的文件中没有可验证的本地文件")
                 return
 
             # 设置验证状态
@@ -378,7 +390,8 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(0)
             self.status_label.setText("开始MD5验证...")
 
-            self._log(f"开始验证 {len(files_to_verify)} 个文件的MD5...")
+            total_selected = len(checked_items)
+            self._log(f"开始MD5验证 - 总选择: {total_selected}, 需验证: {len(files_to_verify)}, 智能跳过: {already_verified_count}")
 
             # 导入验证相关模块
             from core.resume import IntegrityManager, ResumeConfig
@@ -495,16 +508,17 @@ class MainWindow(QMainWindow):
                 self._log(f"MD5验证已取消 - 已验证: {verified_count}/{len(files_to_verify)}")
                 
                 # 显示取消摘要
-                if verified_count > 0:
+                if verified_count > 0 or already_verified_count > 0:
                     QMessageBox.information(
                         self, 
                         "验证已取消", 
                         f"MD5验证已被用户取消！\n\n"
-                        f"总文件数: {len(files_to_verify)}\n"
+                        f"待验证文件数: {len(files_to_verify)}\n"
                         f"已验证: {verified_count}\n"
                         f"验证成功: {success_count}\n"
                         f"验证失败: {failed_count}\n"
-                        f"未验证: {len(files_to_verify) - verified_count}\n\n"
+                        f"未验证: {len(files_to_verify) - verified_count}\n"
+                        f"智能跳过: {already_verified_count} (已验证成功)\n\n"
                         f"详细结果请查看MD5列的颜色显示"
                     )
             else:
@@ -512,14 +526,19 @@ class MainWindow(QMainWindow):
                 self._log(f"✅ MD5验证完成 - 总计: {verified_count}, 成功: {success_count}, 失败: {failed_count}")
 
                 # 显示验证结果摘要
-                if verified_count > 0:
+                if verified_count > 0 or already_verified_count > 0:
+                    total_processed = verified_count + already_verified_count
+                    total_success = success_count + already_verified_count
                     QMessageBox.information(
                         self, 
                         "验证完成", 
                         f"MD5验证完成！\n\n"
-                        f"验证文件数: {verified_count}\n"
+                        f"总处理文件数: {total_processed}\n"
+                        f"本次验证: {verified_count}\n"
                         f"验证成功: {success_count}\n"
-                        f"验证失败: {failed_count}\n\n"
+                        f"验证失败: {failed_count}\n"
+                        f"智能跳过: {already_verified_count} (已验证成功)\n"
+                        f"总成功率: {total_success}/{total_processed} ({total_success/total_processed*100:.1f}%)\n\n"
                         f"详细结果请查看MD5列的颜色显示"
                     )
 
