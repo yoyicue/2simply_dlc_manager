@@ -32,6 +32,41 @@ class FileTableModel(QAbstractTableModel):
         self._filtered_items: List[FileItem] = []  # 过滤后的条目
         self._checked_items: set = set()  # 选中的行索引
         self._current_filters = {'status': None, 'search': ''}
+        
+        # 新增：提供 O(1) 访问的映射表
+        #   1) _filename_map 用于通过文件名快速获取 FileItem
+        #   2) _filtered_row_map 用于通过文件名快速获取在过滤后列表中的行号
+        # 这些映射避免了在 4 万行列表里线性搜索，显著提升 UI 更新性能
+        self._filename_map: dict[str, FileItem] = {}
+        self._filtered_row_map: dict[str, int] = {}
+        # 映射表状态追踪，避免不必要的重建
+        self._filename_map_valid = False
+        self._filtered_row_map_valid = False
+    
+    # --------------------------- 私有辅助方法 ---------------------------
+    def _ensure_filename_map(self):
+        """延迟构建文件名映射表，只有在需要时才构建"""
+        if not self._filename_map_valid:
+            self._filename_map = {item.filename: item for item in self._file_items}
+            self._filename_map_valid = True
+
+    def _ensure_filtered_row_map(self):
+        """延迟构建过滤后行号映射表，只有在需要时才构建"""
+        if not self._filtered_row_map_valid:
+            self._filtered_row_map = {
+                item.filename: idx for idx, item in enumerate(self._filtered_items)
+            }
+            self._filtered_row_map_valid = True
+
+    def _invalidate_filename_map(self):
+        """标记文件名映射表为无效，下次访问时将重建"""
+        self._filename_map_valid = False
+        self._filename_map.clear()
+    
+    def _invalidate_filtered_row_map(self):
+        """标记过滤映射表为无效，下次访问时将重建"""
+        self._filtered_row_map_valid = False
+        self._filtered_row_map.clear()
     
     def set_file_items(self, file_items: List[FileItem]):
         """设置文件项列表"""
@@ -40,6 +75,9 @@ class FileTableModel(QAbstractTableModel):
         self._filtered_items = file_items.copy()  # 初始时显示所有项目
         # 默认全选所有文件
         self._checked_items = set(range(len(self._filtered_items)))
+        # 标记映射表为无效，但不立即构建（延迟到真正需要时）
+        self._invalidate_filename_map()
+        self._invalidate_filtered_row_map()
         self.endResetModel()
         # 发送选择变化信号
         self.selection_changed.emit()
@@ -137,6 +175,9 @@ class FileTableModel(QAbstractTableModel):
         for i, item in enumerate(self._filtered_items):
             if item.md5 in currently_checked_md5s:
                 self._checked_items.add(i)
+        
+        # 过滤结果变化后需要重建行号映射
+        self._invalidate_filtered_row_map()
         
         self.endResetModel()
         self.selection_changed.emit()
@@ -284,4 +325,20 @@ class FileTableModel(QAbstractTableModel):
             size /= 1024
             unit_index += 1
         
-        return f"{size:.1f} {units[unit_index]}" 
+        return f"{size:.1f} {units[unit_index]}"
+    
+    # --------------------------- 快速访问/更新接口 ---------------------------
+    def get_item_by_filename(self, filename: str) -> Optional[FileItem]:
+        """O(1) 根据文件名获取 FileItem"""
+        self._ensure_filename_map()
+        return self._filename_map.get(filename)
+
+    def update_file_by_filename(self, filename: str):
+        """O(1) 根据文件名高效刷新表格中的对应行"""
+        self._ensure_filtered_row_map()
+        row = self._filtered_row_map.get(filename)
+        if row is not None:
+            self.dataChanged.emit(
+                self.index(row, 0),
+                self.index(row, self.columnCount() - 1)
+            ) 

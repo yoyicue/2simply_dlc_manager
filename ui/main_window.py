@@ -406,7 +406,7 @@ class MainWindow(QMainWindow):
 
                 # 标记为验证中
                 item.mark_md5_verifying()
-                self.file_table_model.update_file_item(item)
+                self.file_table_model.update_file_by_filename(item.filename)
 
                 # 让UI有机会响应用户操作
                 await asyncio.sleep(0.01)
@@ -415,7 +415,7 @@ class MainWindow(QMainWindow):
                 if self._verification_cancelled:
                     # 恢复为未验证状态
                     item.reset_md5_verify_status()
-                    self.file_table_model.update_file_item(item)
+                    self.file_table_model.update_file_by_filename(item.filename)
                     break
 
                 # 执行验证
@@ -432,7 +432,7 @@ class MainWindow(QMainWindow):
                     # 检查是否在验证过程中被取消
                     if self._verification_cancelled:
                         item.reset_md5_verify_status()
-                        self.file_table_model.update_file_item(item)
+                        self.file_table_model.update_file_by_filename(item.filename)
                         break
 
                     # 更新验证结果和下载状态
@@ -457,13 +457,11 @@ class MainWindow(QMainWindow):
                         item.error_message = f"MD5验证异常: {str(e)}"
                         self._log(f"❌ {item.filename} - MD5验证出错，已标记为需重新下载: {str(e)}")
 
-                # 更新表格显示
-                self.file_table_model.update_file_item(item)
-                
-                # 强制刷新表格视图以确保颜色更新
+                # 更新表格显示（O(1)）
+                self.file_table_model.update_file_by_filename(item.filename)
+                # 仍然强制刷新表格视图，确保颜色等视觉元素即时更新
                 if hasattr(self, 'file_table_view') and self.file_table_view:
                     self.file_table_view.viewport().update()
-                    # 刷新整个表格视图
                     self.file_table_view.repaint()
                 
                 verified_count += 1
@@ -798,11 +796,8 @@ class MainWindow(QMainWindow):
     # 下载器信号处理方法
     def _on_progress_updated(self, filename: str, progress: float):
         """文件进度更新"""
-        # 在表格中找到对应文件并更新
-        for item in self.file_table_model.get_file_items():
-            if item.filename == filename:
-                self.file_table_model.update_file_item(item)
-                break
+        # 通过文件名直接高效刷新表格，避免 O(n) 搜索
+        self.file_table_model.update_file_by_filename(filename)
     
     @qasync.asyncSlot(str, bool, str)
     async def _on_file_completed(self, filename: str, success: bool, message: str):
@@ -812,11 +807,8 @@ class MainWindow(QMainWindow):
             status = "成功" if success else "失败"
             self._log(f"文件下载完成: {filename} - {status} ({message})")
         
-        # 更新表格显示
-        for item in self.file_table_model.get_file_items():
-            if item.filename == filename:
-                self.file_table_model.update_file_item(item)
-                break
+        # 更新表格显示（O(1)）
+        self.file_table_model.update_file_by_filename(filename)
         
         self._update_statistics()
         
