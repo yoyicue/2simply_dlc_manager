@@ -750,14 +750,56 @@ class MainWindow(QMainWindow):
     async def _start_download(self):
         """开始下载"""
         try:
-            if not self.current_output_dir:
-                QMessageBox.warning(self, "警告", "请先选择下载目录")
+            # 1. 检查是否已加载文件映射
+            file_items = self.file_table_model.get_file_items()
+            if not file_items:
+                QMessageBox.warning(
+                    self, 
+                    "未加载文件", 
+                    "请先加载BigFilesMD5s.json文件！\n\n"
+                    "点击「加载BigFilesMD5s.json」按钮来加载文件映射。"
+                )
                 return
 
+            # 2. 检查是否已设置下载目录
+            if not self.current_output_dir:
+                QMessageBox.warning(
+                    self, 
+                    "未设置下载目录", 
+                    "请先选择下载目录！\n\n"
+                    "点击「选择下载目录」按钮来设置下载路径。"
+                )
+                return
+
+            # 3. 检查是否有选中的文件
             checked_items = self.file_table_model.get_checked_items()
             if not checked_items:
-                QMessageBox.warning(self, "警告", "请至少选择一个文件进行下载")
+                total_files = len(file_items)
+                filtered_files = self.file_table_model.rowCount()
+                
+                if filtered_files == 0:
+                    QMessageBox.information(
+                        self, 
+                        "没有可下载文件", 
+                        f"当前过滤条件下没有文件可显示。\n\n"
+                        f"总文件数: {total_files}\n"
+                        f"过滤后: {filtered_files}\n\n"
+                        f"请调整过滤条件或重新加载文件。"
+                    )
+                else:
+                    QMessageBox.information(
+                        self, 
+                        "未选择文件", 
+                        f"请至少选择一个文件进行下载！\n\n"
+                        f"当前显示: {filtered_files} 个文件\n"
+                        f"已选择: 0 个文件\n\n"
+                        f"💡 提示: 可以使用「全选」、「选择失败」、「选择待下载」等快捷按钮。"
+                    )
                 return
+
+            # 4. 显示下载准备信息
+            self._log(f"🚀 准备开始下载: {len(checked_items)} 个文件")
+            self._log(f"📁 下载目录: {self.current_output_dir}")
 
             # 创建下载配置
             config = DownloadConfig(
@@ -807,8 +849,34 @@ class MainWindow(QMainWindow):
     
     def _cancel_download(self):
         """取消下载"""
-        if self.downloader:
-            self.downloader.cancel_download()
+        if self.downloader and self.downloader.is_downloading:
+            # 显示确认对话框
+            reply = QMessageBox.question(
+                self,
+                "确认取消下载",
+                "确定要取消正在进行的下载吗？\n\n"
+                "• 已下载完成的文件将保留\n"
+                "• 正在下载的文件将被中断\n"
+                "• 可以稍后重新开始下载",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                self._log("用户请求取消下载...")
+                self.downloader.cancel_download()
+                # 更新按钮状态
+                self.cancel_download_btn.setEnabled(False)
+                self.cancel_download_btn.setToolTip("正在取消下载...")
+            else:
+                self._log("用户取消了取消下载操作")
+        else:
+            # 当前没有下载任务
+            QMessageBox.information(
+                self,
+                "没有下载任务",
+                "当前没有正在进行的下载任务。"
+            )
     
     def _toggle_check_all(self):
         """切换全选状态"""
@@ -841,15 +909,49 @@ class MainWindow(QMainWindow):
         is_downloading = bool(self.downloader and self.downloader.is_downloading)
         is_verifying = hasattr(self, '_is_verifying') and self._is_verifying
         
-        # 更新按钮状态
-        self.start_download_btn.setEnabled(
-            has_files and has_output_dir and has_selection and not is_downloading and not is_verifying
-        )
+        # 更新开始下载按钮状态和提示
+        download_enabled = has_files and has_output_dir and has_selection and not is_downloading and not is_verifying
+        self.start_download_btn.setEnabled(download_enabled)
+        
+        if not download_enabled:
+            if not has_files:
+                self.start_download_btn.setToolTip("请先加载BigFilesMD5s.json文件")
+            elif not has_output_dir:
+                self.start_download_btn.setToolTip("请先选择下载目录")
+            elif not has_selection:
+                self.start_download_btn.setToolTip("请至少选择一个文件进行下载")
+            elif is_downloading:
+                self.start_download_btn.setToolTip("正在下载中，请等待完成")
+            elif is_verifying:
+                self.start_download_btn.setToolTip("正在验证MD5，请等待完成")
+        else:
+            self.start_download_btn.setToolTip(f"开始下载选中的 {len(self.file_table_model.get_checked_items())} 个文件")
+        
+        # 更新取消下载按钮状态和提示
         self.cancel_download_btn.setEnabled(is_downloading)
+        if is_downloading:
+            self.cancel_download_btn.setToolTip("取消正在进行的下载")
+        else:
+            self.cancel_download_btn.setToolTip("当前没有下载任务")
+        
         # MD5验证按钮：验证过程中也保持可点击（用于取消），但不能在下载时点击
-        self.verify_md5_btn.setEnabled(
-            has_files and has_output_dir and has_selection and not is_downloading
-        )
+        verify_enabled = has_files and has_output_dir and has_selection and not is_downloading
+        self.verify_md5_btn.setEnabled(verify_enabled)
+        
+        if not verify_enabled:
+            if not has_files:
+                self.verify_md5_btn.setToolTip("请先加载BigFilesMD5s.json文件")
+            elif not has_output_dir:
+                self.verify_md5_btn.setToolTip("请先选择下载目录")
+            elif not has_selection:
+                self.verify_md5_btn.setToolTip("请至少选择一个文件进行验证")
+            elif is_downloading:
+                self.verify_md5_btn.setToolTip("下载过程中无法验证MD5")
+        else:
+            if is_verifying:
+                self.verify_md5_btn.setToolTip("取消正在进行的MD5验证")
+            else:
+                self.verify_md5_btn.setToolTip(f"验证选中的 {len(self.file_table_model.get_checked_items())} 个文件的MD5完整性")
         
         # 更新全选按钮文本
         checked_count = len(self.file_table_model.get_checked_items())
@@ -1017,6 +1119,20 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.status_label.setText("下载已取消")
         self.downloader = None
+        self._log("✅ 下载已成功取消")
+        
+        # 显示取消确认提示
+        checked_count = len(self.file_table_model.get_checked_items())
+        QMessageBox.information(
+            self,
+            "下载已取消",
+            f"下载已成功取消！\n\n"
+            f"💡 提示:\n"
+            f"• 已下载完成的文件已保存\n"
+            f"• 仍有 {checked_count} 个文件处于选中状态\n"
+            f"• 可以随时点击「开始下载」继续下载"
+        )
+        
         self._update_ui_state()
     
     # MD5计算器信号处理方法
