@@ -335,6 +335,11 @@ class MainWindow(QMainWindow):
     def _cancel_md5_verification(self):
         """取消MD5验证"""
         self._verification_cancelled = True
+        
+        # 如果有并行MD5计算器，取消它
+        if hasattr(self, 'md5_calculator') and self.md5_calculator:
+            self.md5_calculator.cancel_calculation()
+        
         self.verify_md5_btn.setText("验证MD5")
         self.verify_md5_btn.setToolTip("验证选中文件的MD5完整性")
         self.status_label.setText("正在取消MD5验证...")
@@ -342,7 +347,7 @@ class MainWindow(QMainWindow):
     
     @qasync.asyncSlot()
     async def _verify_selected_files(self):
-        """验证选中文件的MD5"""
+        """验证选中文件的MD5 - 并行版本"""
         try:
             if not self.current_output_dir:
                 QMessageBox.warning(self, "警告", "请先选择下载目录")
@@ -353,13 +358,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "警告", "请至少选择一个文件进行验证")
                 return
 
-            # 过滤出只有已完成的文件进行验证
+            # 过滤出需要验证的文件
             files_to_verify = []
             already_verified_count = 0
             for item in checked_items:
                 file_path = self.current_output_dir / item.full_filename
                 if file_path.exists():
-                    # 新增：跳过已经验证成功的文件
+                    # 跳过已经验证成功的文件
                     if item.md5_verify_status == MD5VerifyStatus.VERIFIED_SUCCESS:
                         already_verified_count += 1
                         continue
@@ -388,113 +393,88 @@ class MainWindow(QMainWindow):
             # 显示进度
             self.progress_bar.setVisible(True)
             self.progress_bar.setValue(0)
-            self.status_label.setText("开始MD5验证...")
+            self.status_label.setText("开始并行MD5验证...")
 
             total_selected = len(checked_items)
-            self._log(f"开始MD5验证 - 总选择: {total_selected}, 需验证: {len(files_to_verify)}, 智能跳过: {already_verified_count}")
+            self._log(f"开始并行MD5验证 - 总选择: {total_selected}, 需验证: {len(files_to_verify)}, 智能跳过: {already_verified_count}")
 
-            # 导入验证相关模块
-            from core.resume import IntegrityManager, ResumeConfig
+            # 导入并行MD5验证器
+            from core.verification import ParallelMD5Calculator
+            
+            # 创建下载配置（复用现有配置）
+            config = DownloadConfig(
+                concurrent_requests=self.concurrent_spin.value(),
+                timeout=self.timeout_spin.value(),
+                batch_size=self.batch_size_spin.value()
+            )
 
-            # 创建验证管理器
-            config = ResumeConfig()
-            integrity_manager = IntegrityManager(config)
-
-            verified_count = 0
+            # 创建并行MD5计算器
+            self.md5_calculator = ParallelMD5Calculator(config)
+            
+            # 连接信号
+            self.md5_calculator.file_completed.connect(self._on_md5_file_completed)
+            self.md5_calculator.overall_progress.connect(self._on_md5_overall_progress)
+            self.md5_calculator.log_message.connect(self._log)
+            
+            # 开始并行计算
+            results = await self.md5_calculator.calculate_md5_parallel(
+                files_to_verify, 
+                self.current_output_dir
+            )
+            
+            # 处理结果并更新状态
             success_count = 0
             failed_count = 0
-
-            for idx, item in enumerate(files_to_verify):
-                # 检查取消标志
-                if self._verification_cancelled:
-                    self._log(f"在验证第 {idx+1} 个文件时用户取消了验证")
-                    break
-
-                file_path = self.current_output_dir / item.full_filename
-                
-                # 更新进度
-                progress = (idx / len(files_to_verify)) * 100
-                self.progress_bar.setValue(int(progress))
-                self.status_label.setText(f"验证中... {idx+1}/{len(files_to_verify)} - {item.filename}")
-
-                # 标记为验证中
-                item.mark_md5_verifying()
-                self.file_table_model.update_file_by_filename(item.filename)
-
-                # 让UI有机会响应用户操作
-                await asyncio.sleep(0.01)
-                
-                # 再次检查取消标志（在实际验证前）
-                if self._verification_cancelled:
-                    # 恢复为未验证状态
-                    item.reset_md5_verify_status()
-                    self.file_table_model.update_file_by_filename(item.filename)
-                    break
-
-                # 执行验证
-                def progress_callback(message):
-                    # 在进度回调中也检查取消标志
-                    if not self._verification_cancelled:
-                        self._log(f"[{item.filename}] {message}")
-
-                try:
-                    result = integrity_manager.verify_integrity_enhanced(
-                        item, file_path, progress_callback
-                    )
-
-                    # 检查是否在验证过程中被取消
-                    if self._verification_cancelled:
-                        item.reset_md5_verify_status()
-                        self.file_table_model.update_file_by_filename(item.filename)
+            
+            for filename, result in results.items():
+                # 找到对应的文件项
+                file_item = None
+                for item in files_to_verify:
+                    if item.filename == filename:
+                        file_item = item
                         break
-
-                    # 更新验证结果和下载状态
-                    item.mark_md5_verified(result.calculated_hash, result.is_valid)
+                
+                if not file_item:
+                    continue
+                
+                if result.success:
+                    # 检查MD5是否匹配
+                    is_match = not result.error  # error为空表示MD5匹配
+                    file_item.mark_md5_verified(result.calculated_md5, is_match)
                     
-                    if result.is_valid:
-                        # 验证成功，保持已完成状态（如果原来是已完成的话）
+                    if is_match:
                         success_count += 1
-                        self._log(f"✅ {item.filename} - MD5验证成功")
                     else:
-                        # 验证失败，更改状态为验证失败，方便后续重新下载
-                        item.status = DownloadStatus.VERIFY_FAILED
-                        item.error_message = result.error_message or "MD5哈希值不匹配"
+                        # MD5不匹配，标记为验证失败
+                        file_item.status = DownloadStatus.VERIFY_FAILED
+                        file_item.error_message = result.error
                         failed_count += 1
-                        self._log(f"❌ {item.filename} - MD5验证失败，已标记为需重新下载: {item.error_message}")
-
-                except Exception as e:
-                    if not self._verification_cancelled:
-                        failed_count += 1
-                        item.mark_md5_verified("", False)
-                        item.status = DownloadStatus.VERIFY_FAILED
-                        item.error_message = f"MD5验证异常: {str(e)}"
-                        self._log(f"❌ {item.filename} - MD5验证出错，已标记为需重新下载: {str(e)}")
-
-                # 更新表格显示（O(1)）
-                self.file_table_model.update_file_by_filename(item.filename)
-                # 仍然强制刷新表格视图，确保颜色等视觉元素即时更新
-                if hasattr(self, 'file_table_view') and self.file_table_view:
-                    self.file_table_view.viewport().update()
-                    self.file_table_view.repaint()
+                else:
+                    # 计算失败
+                    file_item.mark_md5_verified("", False)
+                    file_item.status = DownloadStatus.VERIFY_FAILED
+                    file_item.error_message = result.error
+                    failed_count += 1
                 
-                verified_count += 1
-
-                # 每验证5个文件保存一次状态（减少I/O频率）
-                if verified_count % 5 == 0 or verified_count == len(files_to_verify):
-                    try:
-                        loop = asyncio.get_event_loop()
-                        await loop.run_in_executor(
-                            None,
-                            self.data_manager.save_state,
-                            self.file_table_model.get_file_items(),
-                            self.current_output_dir
-                        )
-                    except Exception as e:
-                        self._log(f"保存状态失败: {e}")
-                
-                # 让UI有机会响应（特别是对于大量文件）
-                if idx % 10 == 0:  # 每10个文件给UI一次响应机会
-                    await asyncio.sleep(0.05)
+                # 更新表格显示
+                self.file_table_model.update_file_by_filename(file_item.filename)
+            
+            # 强制刷新表格视图
+            if hasattr(self, 'file_table_view') and self.file_table_view:
+                self.file_table_view.viewport().update()
+                self.file_table_view.repaint()
+            
+            # 保存状态
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    self.data_manager.save_state,
+                    self.file_table_model.get_file_items(),
+                    self.current_output_dir
+                )
+            except Exception as e:
+                self._log(f"保存状态失败: {e}")
 
             # 验证完成
             self.progress_bar.setVisible(False)
@@ -505,36 +485,20 @@ class MainWindow(QMainWindow):
             
             if self._verification_cancelled:
                 self.status_label.setText("MD5验证已取消")
-                self._log(f"MD5验证已取消 - 已验证: {verified_count}/{len(files_to_verify)}")
-                
-                # 显示取消摘要
-                if verified_count > 0 or already_verified_count > 0:
-                    QMessageBox.information(
-                        self, 
-                        "验证已取消", 
-                        f"MD5验证已被用户取消！\n\n"
-                        f"待验证文件数: {len(files_to_verify)}\n"
-                        f"已验证: {verified_count}\n"
-                        f"验证成功: {success_count}\n"
-                        f"验证失败: {failed_count}\n"
-                        f"未验证: {len(files_to_verify) - verified_count}\n"
-                        f"智能跳过: {already_verified_count} (已验证成功)\n\n"
-                        f"详细结果请查看MD5列的颜色显示"
-                    )
+                self._log(f"并行MD5验证已取消")
             else:
-                self.status_label.setText(f"MD5验证完成 - 成功: {success_count}, 失败: {failed_count}")
-                self._log(f"✅ MD5验证完成 - 总计: {verified_count}, 成功: {success_count}, 失败: {failed_count}")
-
+                self.status_label.setText(f"并行MD5验证完成 - 成功: {success_count}, 失败: {failed_count}")
+                
                 # 显示验证结果摘要
-                if verified_count > 0 or already_verified_count > 0:
-                    total_processed = verified_count + already_verified_count
+                if len(files_to_verify) > 0 or already_verified_count > 0:
+                    total_processed = len(files_to_verify) + already_verified_count
                     total_success = success_count + already_verified_count
                     QMessageBox.information(
                         self, 
-                        "验证完成", 
-                        f"MD5验证完成！\n\n"
+                        "并行验证完成", 
+                        f"并行MD5验证完成！\n\n"
                         f"总处理文件数: {total_processed}\n"
-                        f"本次验证: {verified_count}\n"
+                        f"本次验证: {len(files_to_verify)}\n"
                         f"验证成功: {success_count}\n"
                         f"验证失败: {failed_count}\n"
                         f"智能跳过: {already_verified_count} (已验证成功)\n"
@@ -543,13 +507,13 @@ class MainWindow(QMainWindow):
                     )
 
         except Exception as e:
-            error_msg = f"MD5验证过程中发生错误: {str(e)}"
+            error_msg = f"并行MD5验证过程中发生错误: {str(e)}"
             self._log(error_msg)
             QMessageBox.critical(self, "验证错误", error_msg)
             
             # 打印完整的错误信息到控制台用于调试
             import traceback
-            print("=== MD5验证错误详情 ===")
+            print("=== 并行MD5验证错误详情 ===")
             traceback.print_exc()
             print("=== 错误详情结束 ===")
         
@@ -557,6 +521,10 @@ class MainWindow(QMainWindow):
             # 重置验证状态
             self._is_verifying = False
             self._verification_cancelled = False
+            
+            # 清理MD5计算器
+            if hasattr(self, 'md5_calculator'):
+                self.md5_calculator = None
             
             # 恢复按钮状态（防止异常情况下按钮状态不正确）
             self.verify_md5_btn.setText("验证MD5")
@@ -898,6 +866,25 @@ class MainWindow(QMainWindow):
         self.status_label.setText("下载已取消")
         self.downloader = None
         self._update_ui_state()
+    
+    # MD5计算器信号处理方法
+    def _on_md5_file_completed(self, filename: str, success: bool, message: str):
+        """MD5文件计算完成"""
+        # 更新表格显示
+        self.file_table_model.update_file_by_filename(filename)
+        
+        # 记录日志（只记录失败的情况，成功的太多会刷屏）
+        if not success:
+            self._log(f"❌ {filename} - {message}")
+    
+    def _on_md5_overall_progress(self, progress: float, completed_count: int, total_count: int):
+        """MD5整体进度更新"""
+        # 更新进度条和状态显示
+        self.progress_bar.setValue(int(progress))
+        self.status_label.setText(f"并行MD5验证中... {completed_count}/{total_count} ({progress:.1f}%)")
+        
+        # 更新统计信息
+        self._update_statistics()
     
     def _create_menubar(self):
         """创建菜单栏"""
