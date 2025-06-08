@@ -39,21 +39,28 @@ class ParallelMD5Calculator(QObject):
         super().__init__()
         self.config = config or DownloadConfig()
         self._cancelled = False
+        self._skip_existence_check = False  # 是否跳过存在性检查（用于批量优化）
+        
         
     async def calculate_md5_parallel(self, file_items: List[FileItem], 
                                    output_dir: Path) -> Dict[str, MD5Result]:
-        """并行计算MD5 - 复用现有ThreadPoolExecutor模式"""
+        """并行计算MD5 - 流式处理版本，不累积大结果集"""
         if not file_items:
             return {}
         
         self._cancelled = False
-        results = {}
+        # 🚀 流式处理：不再维护大的results字典
+        
+        # 大批量时启用存在性检查跳过优化
+        self._skip_existence_check = len(file_items) > 100
+        if self._skip_existence_check:
+            self.log_message.emit(f"🚀 大批量模式: 跳过重复文件存在性检查")
         
         # 使用现有的智能并发算法
         optimal_threads = self._get_optimal_threads(file_items)
         batch_size = self._get_optimal_batch_size(file_items)
         
-        self.log_message.emit(f"🚀 启动并行MD5计算: {len(file_items)} 个文件")
+        self.log_message.emit(f"🚀 启动流式MD5计算: {len(file_items)} 个文件")
         self.log_message.emit(f"⚡ 使用 {optimal_threads} 线程, 批次大小 {batch_size}")
         
         # 分批处理 - 复用现有分批逻辑
@@ -61,38 +68,65 @@ class ParallelMD5Calculator(QObject):
         completed_files = 0
         total_files = len(file_items)
         
+        # 流式处理统计
+        stream_stats = {
+            'success_count': 0,
+            'failed_count': 0,
+            'total_size': 0,
+            'total_time': 0.0
+        }
+        
         for batch_idx, batch in enumerate(batches):
             if self._cancelled:
                 break
                 
-            self.log_message.emit(f"🔄 处理批次 {batch_idx + 1}/{len(batches)} ({len(batch)} 个文件)")
+            self.log_message.emit(f"🔄 流式处理批次 {batch_idx + 1}/{len(batches)} ({len(batch)} 个文件)")
             
             # 并行处理当前批次 - 复用现有ThreadPoolExecutor模式
             batch_results = await self._process_batch_parallel(
                 batch, output_dir, optimal_threads
             )
             
-            # 处理批次结果
+            # 🚀 流式处理批次结果：立即发送信号，不累积
             for result in batch_results:
-                results[result.filename] = result
                 completed_files += 1
                 
-                # 发送文件完成信号
-                success_msg = "MD5验证成功" if result.success and not result.error else result.error
+                # 更新流式统计
+                if result.success:
+                    stream_stats['success_count'] += 1
+                    stream_stats['total_size'] += result.file_size
+                    stream_stats['total_time'] += result.elapsed_time
+                else:
+                    stream_stats['failed_count'] += 1
+                
+                # 立即发送文件完成信号
+                success_msg = "" if result.success and not result.error else result.error
                 self.file_completed.emit(result.filename, result.success, success_msg)
                 
                 # 更新整体进度
                 progress = (completed_files / total_files) * 100
                 self.overall_progress.emit(progress, completed_files, total_files)
             
+            # 🚮 批次结束：立即清理结果并垃圾回收
+            batch_results.clear()
+            del batch_results
+            
             # 批次间暂停，保持UI响应
             await asyncio.sleep(0.01)
+
+            # 🚮 主动触发垃圾回收，避免批次间内存累积
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
         
-        # 输出统计信息
+        # 输出流式统计信息
         if not self._cancelled:
-            self._log_performance_stats(results)
+            self._log_stream_performance_stats(stream_stats)
         
-        return results
+        # 🚀 返回空字典，所有结果已通过信号流式发送
+        return {}
     
     async def _process_batch_parallel(self, batch: List[FileItem], 
                                     output_dir: Path, max_workers: int) -> List[MD5Result]:
@@ -141,6 +175,8 @@ class ParallelMD5Calculator(QObject):
                     batch_results.append(error_result)
                     completed_tasks += 1
             
+            # 主动清理任务引用，帮助垃圾回收
+            tasks.clear()
             return batch_results
     
     def _calculate_single_md5(self, file_item: FileItem, output_dir: Path) -> MD5Result:
@@ -149,14 +185,15 @@ class ParallelMD5Calculator(QObject):
         file_path = output_dir / file_item.full_filename
         
         try:
-            # 检查文件是否存在
-            if not file_path.exists():
-                return MD5Result(
-                    filename=file_item.filename,
-                    success=False,
-                    md5_hash=file_item.md5,
-                    error="文件不存在"
-                )
+            # 智能存在性检查：大批量时跳过（已在UI层检查），小批量时检查
+            if not self._skip_existence_check:
+                if not file_path.exists():
+                    return MD5Result(
+                        filename=file_item.filename,
+                        success=False,
+                        md5_hash=file_item.md5,
+                        error="文件不存在"
+                    )
             
             # 获取文件大小
             file_size = file_path.stat().st_size
@@ -200,7 +237,7 @@ class ParallelMD5Calculator(QObject):
             raise Exception(f"读取文件失败: {str(e)}")
     
     def _calculate_md5_apple_optimized(self, file_path: Path) -> str:
-        """Apple Silicon优化的MD5计算"""
+        """Apple Silicon优化的MD5计算 - 内存优化版本"""
         import platform
         
         # 检测Apple Silicon
@@ -211,40 +248,62 @@ class ParallelMD5Calculator(QObject):
             file_size = file_path.stat().st_size
             
             if is_apple_silicon:
-                # Apple Silicon优化路径
-                if file_size < 512 * 1024:  # <512KB小文件
-                    # 统一内存架构优势：一次性读取
-                    with open(file_path, 'rb') as f:
-                        data = f.read()
-                    
+                # Apple Silicon 也改为分块读取，防止小文件一次性读造成大内存碎片
+                if file_size < 256 * 1024:  # <256KB 小文件
                     # 尝试硬件加速模式
                     try:
-                        return hashlib.md5(data, usedforsecurity=False).hexdigest()
+                        md5_hash = hashlib.md5(usedforsecurity=False)
                     except TypeError:
-                        return hashlib.md5(data).hexdigest()
-                else:
-                    # 使用Apple Silicon优化的16KB块大小
-                    md5_hash = hashlib.md5()
+                        md5_hash = hashlib.md5()
+                    
                     with open(file_path, 'rb') as f:
-                        while chunk := f.read(16384):  # 16KB - Apple Silicon最优
+                        while True:
                             if self._cancelled:
+                                break
+                            chunk = f.read(16384)  # 16KB 块
+                            if not chunk:
                                 break
                             md5_hash.update(chunk)
                     return md5_hash.hexdigest()
+                else:
+                    # 使用Apple Silicon优化的16KB块大小
+                    # 尝试硬件加速模式
+                    try:
+                        md5_hash = hashlib.md5(usedforsecurity=False)
+                    except TypeError:
+                        md5_hash = hashlib.md5()
+                    
+                    with open(file_path, 'rb') as f:
+                        while True:
+                            if self._cancelled:
+                                break
+                            chunk = f.read(16384)  # 16KB - Apple Silicon最优
+                            if not chunk:
+                                break
+                            md5_hash.update(chunk)
+                            # 立即释放chunk内存
+                            del chunk
+                    return md5_hash.hexdigest()
             else:
-                # 非Apple Silicon：使用原有逻辑
+                # 非Apple Silicon：使用原有逻辑 - 内存优化
                 md5_hash = hashlib.md5()
                 
-                if file_size < 1024 * 1024:  # <1MB
+                if file_size < 512 * 1024:  # <512KB (降低阈值)
                     with open(file_path, 'rb') as f:
-                        md5_hash.update(f.read())
+                        data = f.read()
+                        md5_hash.update(data)
+                        del data  # 立即释放
                 else:
                     # 64KB块
                     with open(file_path, 'rb') as f:
-                        while chunk := f.read(65536):
+                        while True:
                             if self._cancelled:
                                 break
+                            chunk = f.read(65536)
+                            if not chunk:
+                                break
                             md5_hash.update(chunk)
+                            del chunk  # 立即释放
                 
                 return md5_hash.hexdigest()
                 
@@ -269,24 +328,21 @@ class ParallelMD5Calculator(QObject):
             return base_threads
     
     def _get_optimal_batch_size(self, file_items: List[FileItem]) -> int:
-        """获取最优批次大小 - 基于双重性能测试优化"""
+        """获取最优批次大小 - 内存友好版本"""
         file_count = len(file_items)
         
-        # 基于不同规模的性能测试结果优化
+        # 更激进的小批次策略，防止内存积累
         if file_count < 20:
-            return min(file_count, 10)  # 极小数量：避免空批次
+            return min(file_count, 8)  # 极小数量
         elif file_count < 200:
-            # 小规模：大批次减少调度开销，I/O竞争不激烈
-            return min(50, file_count)  
+            return min(25, file_count)  # 小规模：减少批次大小
         elif file_count < 1000:
-            # 中规模：平衡调度开销和I/O竞争
-            return 30
+            return 15  # 中规模：更小批次
         elif file_count < 5000:
-            # 大规模：I/O竞争开始显现，小批次更优
-            return 20  
+            return 10  # 大规模：小批次防止内存堆积
         else:
-            # 海量文件：严重I/O竞争，最小批次避免磁盘争抢
-            return 15
+            # 海量文件：超小批次，每批只处理少量文件
+            return 8
     
     def _create_batches(self, file_items: List[FileItem], batch_size: int) -> List[List[FileItem]]:
         """创建批次 - 简化版本"""
@@ -296,7 +352,22 @@ class ParallelMD5Calculator(QObject):
         return batches
     
     def _log_performance_stats(self, results: Dict[str, MD5Result]):
-        """记录性能统计"""
+        """记录性能统计 - 包含内存监控"""
+        import gc
+        
+        # 强制垃圾回收
+        gc.collect()
+        
+        # 获取内存使用情况 (可选)
+        memory_mb = 0
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_mb = memory_info.rss / 1024 / 1024
+        except ImportError:
+            # psutil未安装，跳过内存监控
+            pass
         successful_results = [r for r in results.values() if r.success]
         failed_results = [r for r in results.values() if not r.success]
         
@@ -315,6 +386,56 @@ class ParallelMD5Calculator(QObject):
                 
                 self.log_message.emit(f"📈 性能统计: {throughput_mbs:.1f} MB/s, {files_per_sec:.1f} 文件/秒")
                 self.log_message.emit(f"💾 处理数据: {total_size/1024/1024:.1f} MB, 耗时 {total_time:.1f} 秒")
+                
+                # 内存监控 (如果可用)
+                if memory_mb > 0:
+                    self.log_message.emit(f"🧠 内存使用: {memory_mb:.1f} MB")
+                    
+                    # 内存警告
+                    if memory_mb > 1000:  # 超过1GB警告
+                        self.log_message.emit(f"⚠️ 内存使用过高: {memory_mb:.1f} MB，建议重启应用程序")
+    
+    def _log_stream_performance_stats(self, stream_stats: dict):
+        """记录流式处理性能统计 - 内存友好版本"""
+        import gc
+        
+        # 强制垃圾回收
+        gc.collect()
+        
+        # 获取内存使用情况 (可选)
+        memory_mb = 0
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_mb = memory_info.rss / 1024 / 1024
+        except ImportError:
+            # psutil未安装，跳过内存监控
+            pass
+        
+        success_count = stream_stats['success_count']
+        failed_count = stream_stats['failed_count']
+        total_size = stream_stats['total_size']
+        total_time = stream_stats['total_time']
+        
+        self.log_message.emit(f"✅ 流式MD5计算完成: 成功 {success_count}, 失败 {failed_count}")
+        
+        if success_count > 0 and total_time > 0:
+            throughput_mbs = (total_size / 1024 / 1024) / total_time
+            files_per_sec = success_count / total_time
+            
+            self.log_message.emit(f"📈 流式性能: {throughput_mbs:.1f} MB/s, {files_per_sec:.1f} 文件/秒")
+            self.log_message.emit(f"💾 处理数据: {total_size/1024/1024:.1f} MB, 耗时 {total_time:.1f} 秒")
+            
+            # 内存监控 (如果可用)
+            if memory_mb > 0:
+                self.log_message.emit(f"🧠 流式处理内存: {memory_mb:.1f} MB")
+                
+                # 内存改善提示
+                if memory_mb < 500:  # 少于500MB是好的
+                    self.log_message.emit(f"✅ 内存使用良好: {memory_mb:.1f} MB")
+                elif memory_mb > 1000:  # 超过1GB警告
+                    self.log_message.emit(f"⚠️ 内存使用过高: {memory_mb:.1f} MB，建议重启应用程序")
     
     def cancel_calculation(self):
         """取消计算"""
