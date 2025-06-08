@@ -143,6 +143,12 @@ class MainWindow(QMainWindow):
         self.cancel_download_btn.setEnabled(False)
         layout.addWidget(self.cancel_download_btn)
         
+        self.redownload_btn = QPushButton("重新下载")
+        self.redownload_btn.setToolTip("重新下载验证失败的文件，将覆盖现有文件")
+        self.redownload_btn.setEnabled(False)
+        self.redownload_btn.setObjectName("redownload_btn")
+        layout.addWidget(self.redownload_btn)
+        
         layout.addWidget(self._create_separator())
         
         # 选择控制
@@ -174,13 +180,6 @@ class MainWindow(QMainWindow):
         self.verify_md5_btn.setToolTip("验证选中文件的MD5完整性")
         self.verify_md5_btn.setEnabled(False)
         layout.addWidget(self.verify_md5_btn)
-        
-        # 重新下载控制
-        self.redownload_btn = QPushButton("重新下载")
-        self.redownload_btn.setToolTip("重新下载验证失败的文件，将覆盖现有文件")
-        self.redownload_btn.setEnabled(False)
-        self.redownload_btn.setObjectName("redownload_btn")
-        layout.addWidget(self.redownload_btn)
         
         layout.addStretch()
         return toolbar_widget
