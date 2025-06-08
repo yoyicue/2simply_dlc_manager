@@ -175,6 +175,13 @@ class MainWindow(QMainWindow):
         self.verify_md5_btn.setEnabled(False)
         layout.addWidget(self.verify_md5_btn)
         
+        # 重新下载控制
+        self.redownload_btn = QPushButton("重新下载")
+        self.redownload_btn.setToolTip("重新下载验证失败的文件，将覆盖现有文件")
+        self.redownload_btn.setEnabled(False)
+        self.redownload_btn.setObjectName("redownload_btn")
+        layout.addWidget(self.redownload_btn)
+        
         layout.addStretch()
         return toolbar_widget
     
@@ -319,6 +326,9 @@ class MainWindow(QMainWindow):
         
         # MD5验证控制
         self.verify_md5_btn.clicked.connect(self._toggle_md5_verification)
+        
+        # 重新下载控制
+        self.redownload_btn.clicked.connect(self._redownload_verify_failed)
         
         # 表格模型信号
         self.file_table_model.selection_changed.connect(self._update_ui_state)
@@ -878,6 +888,132 @@ class MainWindow(QMainWindow):
                 "当前没有正在进行的下载任务。"
             )
     
+    @qasync.asyncSlot()
+    async def _redownload_verify_failed(self):
+        """重新下载验证失败的文件"""
+        try:
+            # 1. 检查前置条件
+            if not self.current_output_dir:
+                QMessageBox.warning(self, "警告", "请先选择下载目录")
+                return
+
+            checked_items = self.file_table_model.get_checked_items()
+            if not checked_items:
+                QMessageBox.warning(self, "警告", "请至少选择一个文件")
+                return
+
+            # 2. 筛选出验证失败的文件
+            verify_failed_items = [item for item in checked_items 
+                                 if item.status == DownloadStatus.VERIFY_FAILED]
+            
+            if not verify_failed_items:
+                total_selected = len(checked_items)
+                QMessageBox.information(
+                    self,
+                    "没有验证失败文件",
+                    f"选中的 {total_selected} 个文件中没有验证失败的文件。\n\n"
+                    f"💡 提示: 只有状态为「验证失败」的文件才能重新下载。\n"
+                    f"可以使用「选择验证失败」按钮快速选择这类文件。"
+                )
+                return
+
+            # 3. 检查文件是否存在，统计需要覆盖的文件
+            existing_files = []
+            for item in verify_failed_items:
+                file_path = self.current_output_dir / item.full_filename
+                if file_path.exists():
+                    existing_files.append(item.filename)
+
+            # 4. 显示确认对话框
+            confirm_msg = f"确定要重新下载 {len(verify_failed_items)} 个验证失败的文件吗？\n\n"
+            
+            if existing_files:
+                confirm_msg += f"⚠️  将覆盖现有文件:\n"
+                confirm_msg += f"• 需要覆盖的文件数: {len(existing_files)} 个\n"
+                confirm_msg += f"• 保持原状的文件数: {len(verify_failed_items) - len(existing_files)} 个\n\n"
+            else:
+                confirm_msg += f"💡 所有文件都是新下载（没有需要覆盖的文件）\n\n"
+            
+            confirm_msg += "重新下载说明:\n"
+            confirm_msg += "• 现有文件将被完全覆盖\n"
+            confirm_msg += "• 下载失败的文件状态将重置\n"
+            confirm_msg += "• 下载完成后建议重新验证MD5"
+
+            reply = QMessageBox.question(
+                self,
+                "确认重新下载",
+                confirm_msg,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+
+            if reply != QMessageBox.Yes:
+                self._log("用户取消了重新下载操作")
+                return
+
+            # 5. 重置验证失败文件的状态为待下载
+            self._log(f"🔄 准备重新下载 {len(verify_failed_items)} 个验证失败的文件")
+            for item in verify_failed_items:
+                item.status = DownloadStatus.PENDING
+                item.progress = 0.0
+                item.downloaded_size = 0
+                item.error_message = ""
+                # 重置MD5验证状态
+                item.reset_md5_verify_status()
+
+            # 强制刷新表格显示
+            self.file_table_model.beginResetModel()
+            self.file_table_model.endResetModel()
+            
+            # 6. 开始下载（复用现有的下载逻辑）
+            self._log(f"📁 下载目录: {self.current_output_dir}")
+            self._log(f"📋 将覆盖 {len(existing_files)} 个现有文件")
+
+            # 创建下载配置
+            config = DownloadConfig(
+                concurrent_requests=self.concurrent_spin.value(),
+                timeout=self.timeout_spin.value(),
+                batch_size=self.batch_size_spin.value()
+            )
+
+            # 创建下载器
+            self.downloader = Downloader(config)
+
+            # 连接下载器信号
+            self.downloader.progress_updated.connect(self._on_progress_updated)
+            self.downloader.file_completed.connect(self._on_file_completed)
+            self.downloader.overall_progress.connect(self._on_overall_progress)
+            self.downloader.check_progress.connect(self._on_check_progress)
+            self.downloader.log_message.connect(self._log)
+            self.downloader.download_started.connect(self._on_download_started)
+            self.downloader.download_finished.connect(self._on_redownload_finished)
+            self.downloader.download_cancelled.connect(self._on_download_cancelled)
+            self.downloader.statistics_update_requested.connect(self._update_statistics)
+
+            # 开始重新下载
+            self._log(f"🚀 开始重新下载验证失败的文件...")
+            await self.downloader.download_files(verify_failed_items, self.current_output_dir, self.data_manager)
+
+        except Exception as e:
+            error_msg = f"重新下载过程中发生错误: {str(e)}"
+            self._log(error_msg)
+            QMessageBox.critical(self, "重新下载错误", error_msg)
+            
+            # 重置下载状态
+            if hasattr(self, 'downloader'):
+                self.downloader = None
+            self._update_ui_state()
+            
+            # 打印完整的错误信息到控制台用于调试
+            import traceback
+            print("=== 重新下载错误详情 ===")
+            traceback.print_exc()
+            print("=== 错误详情结束 ===")
+        
+        finally:
+            # 确保UI状态正确更新
+            self._update_ui_state()
+    
     def _toggle_check_all(self):
         """切换全选状态"""
         checked_count = len(self.file_table_model.get_checked_items())
@@ -952,6 +1088,31 @@ class MainWindow(QMainWindow):
                 self.verify_md5_btn.setToolTip("取消正在进行的MD5验证")
             else:
                 self.verify_md5_btn.setToolTip(f"验证选中的 {len(self.file_table_model.get_checked_items())} 个文件的MD5完整性")
+        
+        # 更新重新下载按钮状态和提示
+        verify_failed_items = [item for item in self.file_table_model.get_checked_items() 
+                             if item.status == DownloadStatus.VERIFY_FAILED]
+        redownload_enabled = (has_files and has_output_dir and len(verify_failed_items) > 0 
+                            and not is_downloading and not is_verifying)
+        self.redownload_btn.setEnabled(redownload_enabled)
+        
+        if not redownload_enabled:
+            if not has_files:
+                self.redownload_btn.setToolTip("请先加载BigFilesMD5s.json文件")
+            elif not has_output_dir:
+                self.redownload_btn.setToolTip("请先选择下载目录")
+            elif len(verify_failed_items) == 0:
+                selected_count = len(self.file_table_model.get_checked_items())
+                if selected_count == 0:
+                    self.redownload_btn.setToolTip("请选择需要重新下载的验证失败文件")
+                else:
+                    self.redownload_btn.setToolTip("选中的文件中没有验证失败的文件")
+            elif is_downloading:
+                self.redownload_btn.setToolTip("下载过程中无法重新下载")
+            elif is_verifying:
+                self.redownload_btn.setToolTip("验证过程中无法重新下载")
+        else:
+            self.redownload_btn.setToolTip(f"重新下载 {len(verify_failed_items)} 个验证失败的文件（将覆盖现有文件）")
         
         # 更新全选按钮文本
         checked_count = len(self.file_table_model.get_checked_items())
@@ -1113,6 +1274,59 @@ class MainWindow(QMainWindow):
             self._log(f"💾 最终状态保存完成")
         except Exception as e:
             self._log(f"最终状态保存失败: {e}")
+    
+    def _on_redownload_finished(self, success_count: int, failed_count: int):
+        """重新下载完成"""
+        self.progress_bar.setVisible(False)
+        self.status_label.setText(
+            f"重新下载完成 - 成功: {success_count}, 失败: {failed_count}"
+        )
+        self.downloader = None
+        
+        # 强制统计更新
+        self._log(f"📊 重新下载完成，正在更新统计信息...")
+        self._update_ui_state()
+        self._update_statistics()
+        
+        # 显示重新下载完成提示
+        total_redownloaded = success_count + failed_count
+        if failed_count == 0:
+            QMessageBox.information(
+                self,
+                "重新下载完成",
+                f"🎉 重新下载全部成功！\n\n"
+                f"总计重新下载: {total_redownloaded} 个文件\n"
+                f"全部成功: {success_count} 个\n\n"
+                f"💡 建议: 可以对这些文件重新验证MD5，确保完整性。"
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "重新下载完成",
+                f"重新下载已完成，但部分文件仍然失败。\n\n"
+                f"总计重新下载: {total_redownloaded} 个文件\n"
+                f"重新下载成功: {success_count} 个\n"
+                f"仍然失败: {failed_count} 个\n\n"
+                f"💡 建议:\n"
+                f"• 检查网络连接\n"
+                f"• 重新尝试失败的文件\n"
+                f"• 对成功的文件验证MD5"
+            )
+        
+        # 强制最后一次状态保存
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            future = loop.run_in_executor(
+                None,
+                self.data_manager.save_state,
+                self.file_table_model.get_file_items(),
+                self.current_output_dir
+            )
+            future.add_done_callback(lambda f: self._on_final_save_completed(f))
+            self._log(f"💾 重新下载状态保存已提交，后台执行中...")
+        except Exception as e:
+            self._log(f"重新下载状态保存失败: {e}")
     
     def _on_download_cancelled(self):
         """下载取消"""
