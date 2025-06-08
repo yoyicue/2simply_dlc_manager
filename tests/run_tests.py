@@ -48,7 +48,8 @@ def main():
         tests_dir / "test_download.py",
         tests_dir / "test_asyncio.py",
         tests_dir / "test_user_data.py",
-        tests_dir / "test_http2.py"
+        tests_dir / "test_http2.py",
+        tests_dir / "test_parallel_md5.py"  # 并行MD5验证测试
     ]
     
     # 过滤存在的测试文件
