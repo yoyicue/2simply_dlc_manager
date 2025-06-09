@@ -280,7 +280,7 @@ class FileTableModel(QAbstractTableModel):
     
     def _get_background_color(self, file_item: FileItem, column_key: str) -> Optional[QColor]:
         """根据下载状态获取背景色"""
-        # 所有列根据下载状态显示颜色
+        # 只根据下载状态显示颜色，不再区分MD5验证状态
         if file_item.status == DownloadStatus.COMPLETED:
             return QColor(200, 255, 200)  # 浅绿色 - 已完成
         elif file_item.status == DownloadStatus.FAILED:
@@ -301,7 +301,14 @@ class FileTableModel(QAbstractTableModel):
         if column_key == "filename":
             return f"完整文件名: {file_item.full_filename}"
         elif column_key == "md5":
-            return f"完整MD5: {file_item.md5}"
+            tooltip = f"完整MD5: {file_item.md5}"
+            # 添加MD5验证状态信息
+            tooltip += f"\nMD5验证状态: {file_item.md5_verify_status.value}"
+            if file_item.calculated_md5:
+                tooltip += f"\n计算得到的MD5: {file_item.calculated_md5}"
+            if file_item.md5_verify_time:
+                tooltip += f"\n验证时间: {file_item.md5_verify_time}"
+            return tooltip
         elif column_key == "status":
             tooltip = f"状态: {file_item.status.value}"
             if file_item.error_message:

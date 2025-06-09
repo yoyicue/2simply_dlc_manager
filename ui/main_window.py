@@ -251,7 +251,7 @@ class MainWindow(QMainWindow):
         """创建文件表格视图"""
         table_view = QTableView()
         table_view.setModel(self.file_table_model)
-        table_view.setAlternatingRowColors(False)  # 禁用交替行颜色以显示MD5验证状态颜色
+        table_view.setAlternatingRowColors(True)  # 恢复交替行颜色
         table_view.setSelectionBehavior(QTableView.SelectRows)
         table_view.setSortingEnabled(True)
         
@@ -586,8 +586,7 @@ class MainWindow(QMainWindow):
                         f"验证成功: {success_count}\n"
                         f"验证失败: {failed_count}\n"
                         f"智能跳过: {already_verified_count} (已验证成功)\n"
-                        f"总成功率: {total_success}/{total_processed} ({total_success/total_processed*100:.1f}%)\n\n"
-                        f"详细结果请查看MD5列的颜色显示"
+                        f"总成功率: {total_success}/{total_processed} ({total_success/total_processed*100:.1f}%)"
                     )
                     self._log(f"📊 结果摘要弹窗已显示")
 
