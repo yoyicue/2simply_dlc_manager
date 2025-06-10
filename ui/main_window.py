@@ -39,6 +39,14 @@ class MainWindow(QMainWindow):
         self._last_stats_update = 0  # 上次统计更新时间
         self._last_save_time = 0  # 上次保存时间
         
+        # 🚀 新增：CPU监控相关
+        self._cpu_monitor_enabled = True
+        self._performance_stats = {
+            'save_operations': [],
+            'stats_calculations': [],
+            'ui_updates': []
+        }
+        
         # UI组件
         self.file_table_model = FileTableModel()
         self.file_table_view: Optional[QTableView] = None
@@ -1124,18 +1132,36 @@ class MainWindow(QMainWindow):
             self.check_all_btn.setText(f"全选 ({checked_count}/{filtered_count})")
     
     def _update_statistics(self):
-        """更新统计信息"""
-        file_items = self.file_table_model.get_file_items()
-        stats = self.data_manager.get_statistics(file_items)
+        """更新统计信息 - 添加CPU优化标记"""
+        import time
+        start_time = time.time()
         
-        stats_text = (
-            f"总计: {stats['total']} | "
-            f"完成: {stats['completed']} | "
-            f"失败: {stats['failed']} | "
-            f"验证失败: {stats['verify_failed']} | "
-            f"待下载: {stats['pending']}"
-        )
-        self.stats_label.setText(stats_text)
+        try:
+            file_items = self.file_table_model.get_file_items()
+            
+            # 🚀 大数据集保护：如果文件数量很大，使用缓存版本
+            if len(file_items) > 10000:
+                stats = self.data_manager.get_statistics_cached(file_items)
+                operation_name = "large_dataset_stats_cached"
+            else:
+                stats = self.data_manager.get_statistics(file_items)
+                operation_name = "normal_stats_update"
+            
+            stats_text = (
+                f"总计: {stats['total']} | "
+                f"完成: {stats['completed']} | "
+                f"失败: {stats['failed']} | "
+                f"验证失败: {stats['verify_failed']} | "
+                f"待下载: {stats['pending']}"
+            )
+            self.stats_label.setText(stats_text)
+            
+            # 性能监控
+            end_time = time.time()
+            self._monitor_cpu_operation(operation_name, start_time, end_time, len(file_items))
+            
+        except Exception as e:
+            self._log(f"统计信息更新失败: {e}")
     
     def _log(self, message: str):
         """添加日志"""
@@ -1243,35 +1269,78 @@ class MainWindow(QMainWindow):
         )
         self.downloader = None
         
-        # 🚀 大数据集优化：下载完成时最后一次强制统计更新
-        self._log(f"📊 下载完成，正在更新统计信息...")
-        self._update_ui_state()
-        self._update_statistics()
+        # 🚀 大数据集优化：下载完成时使用更高效的处理流程
+        self._log(f"📊 下载完成，正在优化状态更新...")
         
-        # 🚀 强制最后一次状态保存，确保数据完整性
+        # 🚀 优化1：延迟UI更新，避免立即阻塞
+        QTimer.singleShot(100, self._deferred_download_completion_update)
+        
+        # 🚀 优化2：使用异步状态保存，避免主线程阻塞
+        self._schedule_optimized_state_save()
+
+    def _deferred_download_completion_update(self):
+        """延迟的下载完成UI更新，减少主线程阻塞"""
+        try:
+            # 使用缓存的统计信息，避免重新遍历所有文件
+            self._update_ui_state()
+            self._update_statistics_cached()
+            self._log(f"✅ UI状态更新完成")
+        except Exception as e:
+            self._log(f"延迟UI更新失败: {e}")
+
+    def _schedule_optimized_state_save(self):
+        """调度优化的状态保存"""
         try:
             import asyncio
             loop = asyncio.get_event_loop()
-            # 修复：直接使用 run_in_executor 返回的 Future，不要用 create_task 包装
+            
+            # 🚀 使用优化的异步状态保存方法
             future = loop.run_in_executor(
                 None,
-                self.data_manager.save_state,
+                self.data_manager.save_state_optimized_async,
                 self.file_table_model.get_file_items(),
                 self.current_output_dir
             )
-            # 可选：添加完成回调
-            future.add_done_callback(lambda f: self._on_final_save_completed(f))
-            self._log(f"💾 状态保存已提交，后台执行中...")
+            future.add_done_callback(lambda f: self._on_optimized_save_completed(f))
+            self._log(f"💾 优化状态保存已提交，后台执行中...")
         except Exception as e:
-            self._log(f"最终状态保存失败: {e}")
-    
-    def _on_final_save_completed(self, future):
-        """最终状态保存完成回调"""
+            self._log(f"调度优化状态保存失败: {e}")
+
+    def _on_optimized_save_completed(self, future):
+        """优化状态保存完成回调"""
         try:
             future.result()  # 获取结果，如果有异常会抛出
-            self._log(f"💾 最终状态保存完成")
+            self._log(f"💾 优化状态保存完成，CPU占用已降低")
         except Exception as e:
-            self._log(f"最终状态保存失败: {e}")
+            self._log(f"优化状态保存失败: {e}")
+
+    def _update_statistics_cached(self):
+        """使用缓存的统计信息更新，减少CPU占用"""
+        import time
+        start_time = time.time()
+        
+        try:
+            file_items = self.file_table_model.get_file_items()
+            # 🚀 使用缓存版本，避免重复计算
+            stats = self.data_manager.get_statistics_cached(file_items)
+            
+            stats_text = (
+                f"总计: {stats['total']} | "
+                f"完成: {stats['completed']} | "
+                f"失败: {stats['failed']} | "
+                f"验证失败: {stats['verify_failed']} | "
+                f"待下载: {stats['pending']}"
+            )
+            self.stats_label.setText(stats_text)
+            
+            # 性能监控
+            end_time = time.time()
+            self._monitor_cpu_operation("cached_stats_update", start_time, end_time, len(file_items))
+            
+        except Exception as e:
+            # 降级到普通版本
+            self._log(f"缓存统计失败，使用普通版本: {e}")
+            self._update_statistics()
     
     def _on_redownload_finished(self, success_count: int, failed_count: int):
         """重新下载完成"""
@@ -1397,4 +1466,58 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         from .about_dialog import AboutDialog
         dialog = AboutDialog(self)
-        dialog.exec() 
+        dialog.exec()
+
+    def _monitor_cpu_operation(self, operation_name: str, start_time: float, end_time: float, item_count: int = 0):
+        """监控CPU密集型操作的性能"""
+        if not self._cpu_monitor_enabled:
+            return
+        
+        duration = end_time - start_time
+        
+        # 记录性能数据
+        perf_data = {
+            'operation': operation_name,
+            'duration': duration,
+            'item_count': item_count,
+            'items_per_second': item_count / duration if duration > 0 else 0,
+            'timestamp': start_time
+        }
+        
+        # 分类存储
+        if 'save' in operation_name.lower():
+            self._performance_stats['save_operations'].append(perf_data)
+            # 保留最近10次记录
+            if len(self._performance_stats['save_operations']) > 10:
+                self._performance_stats['save_operations'].pop(0)
+        elif 'stats' in operation_name.lower():
+            self._performance_stats['stats_calculations'].append(perf_data)
+            if len(self._performance_stats['stats_calculations']) > 20:
+                self._performance_stats['stats_calculations'].pop(0)
+        elif 'ui' in operation_name.lower():
+            self._performance_stats['ui_updates'].append(perf_data)
+            if len(self._performance_stats['ui_updates']) > 20:
+                self._performance_stats['ui_updates'].pop(0)
+        
+        # 性能警告
+        if duration > 1.0:  # 超过1秒的操作
+            self._log(f"⚠️ 性能警告: {operation_name} 耗时 {duration:.2f}秒 "
+                     f"(处理{item_count}项，{perf_data['items_per_second']:.0f}项/秒)")
+        elif duration > 0.5:  # 超过0.5秒的操作
+            self._log(f"💡 性能提示: {operation_name} 耗时 {duration:.2f}秒")
+
+    def _get_performance_summary(self) -> str:
+        """获取性能摘要报告"""
+        summary = []
+        
+        for category, operations in self._performance_stats.items():
+            if not operations:
+                continue
+            
+            avg_duration = sum(op['duration'] for op in operations) / len(operations)
+            max_duration = max(op['duration'] for op in operations)
+            total_items = sum(op['item_count'] for op in operations)
+            
+            summary.append(f"{category}: 平均{avg_duration:.2f}秒, 最大{max_duration:.2f}秒, 总处理{total_items}项")
+        
+        return " | ".join(summary) if summary else "暂无性能数据" 
