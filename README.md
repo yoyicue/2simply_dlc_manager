@@ -1,3 +1,5 @@
+![DLC Manager UI界面](https://raw.githubusercontent.com/yoyicue/2simply_dlc_manager/refs/heads/master/resources/ui.png)
+
 # DLC Manager
 
 一个使用 PySide6 的某应用程序的 DLC Songs 的乐谱下载管理工具，支持高效异步下载和可视化进度管理。
@@ -224,4 +226,4 @@ python -m pytest tests/test_http2.py -v                     # HTTP/2 测试
 
 ---
 
-�� **让DLC下载变得简单高效！**
+ **让DLC下载变得简单高效！**
